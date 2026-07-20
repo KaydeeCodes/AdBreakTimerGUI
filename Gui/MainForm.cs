@@ -20,7 +20,6 @@ public partial class MainForm : Form
 
     private bool _hasErrorSinceStart;
 
-    // Controls I need to reach from more than one method.
     private Panel _ledPanel = null!;
     private Label _lblStatus = null!;
     private Label _lblPort = null!;
@@ -35,14 +34,20 @@ public partial class MainForm : Form
     private NumericUpDown _numAdBuffer = null!;
     private Button _btnSaveSettings = null!;
 
-    // Twitch tab controls, promoted to fields now that connecting
-    // actually needs to update them after the fact rather than just
-    // setting them once at startup.
     private Label _lblTwitchStatus = null!;
     private Button _btnTwitchConnect = null!;
     private Button _btnTwitchDisconnect = null!;
     private CheckBox _chkAutoDetectAds = null!;
     private TwitchTokenData? _twitchToken;
+    private TwitchEventSubClient? _eventSubClient;
+    private TwitchAdSequencer? _adSequencer;
+    private ComboBox _cmbAutoDetectTarget = null!;
+
+    // The live "last ad / next ad" readout on the Twitch tab, and the
+    // timer that keeps it ticking once a second.
+    private Label _lblLastAd = null!;
+    private Label _lblNextAd = null!;
+    private System.Windows.Forms.Timer _adCycleDisplayTimer = null!;
 
     private NotifyIcon _trayIcon = null!;
     private bool _reallyExiting;
@@ -67,10 +72,15 @@ public partial class MainForm : Form
         if (_settings.StartAutomatically)
             StartServer();
 
-        // Fire and forget is fine here, this only ever updates the
-        // Twitch tab once it resolves, nothing else in startup depends
-        // on it finishing first.
         _ = LoadTwitchStateAsync();
+
+        // Ticks once a second regardless of whether auto detect is
+        // actually running right now, the tick handler itself decides
+        // what to show based on whatever LastAdStartedUtc/
+        // NextAdEstimatedUtc currently say, including "nothing yet".
+        _adCycleDisplayTimer = new System.Windows.Forms.Timer { Interval = 1000 };
+        _adCycleDisplayTimer.Tick += (_, _) => RefreshAdCycleDisplay();
+        _adCycleDisplayTimer.Start();
     }
 
     // ------------------------------------------------------------
@@ -228,7 +238,7 @@ public partial class MainForm : Form
         tab.Controls.Add(_txtAdBreak);
         y += 32;
 
-        tab.Controls.Add(new Label { Location = new Point(12, y + 3), AutoSize = true, Text = "Ad free interval" });
+        tab.Controls.Add(new Label { Location = new Point(12, y + 3), AutoSize = true, Text = "Time between ads (Twitch's number)" });
         _txtAdFree = new TextBox
         {
             Location = new Point(280, y),
@@ -237,7 +247,18 @@ public partial class MainForm : Form
             Text = TimeParsing.SecsToHms(_settings.AdFreeSeconds)
         };
         tab.Controls.Add(_txtAdFree);
-        y += 32;
+        y += 24;
+
+        var adFreeHint = new Label
+        {
+            Location = new Point(12, y),
+            Size = new Size(360, 28),
+            ForeColor = Color.Gray,
+            Font = new Font("Segoe UI", 7.5F),
+            Text = "Same number as Twitch's Ads Manager (\"every X minutes\"), the full cycle including the ad itself, not just the gap. The sequencer subtracts the real ad length and buffer automatically."
+        };
+        tab.Controls.Add(adFreeHint);
+        y += 34;
 
         tab.Controls.Add(new Label { Location = new Point(12, y + 3), Size = new Size(260, 20), Text = "Gap before ad free countdown (s)" });
         _numAdBuffer = new NumericUpDown
@@ -282,8 +303,6 @@ public partial class MainForm : Form
         _btnTwitchConnect.Click += (_, _) => OnTwitchConnectClicked();
         tab.Controls.Add(_btnTwitchConnect);
 
-        // Same spot as Connect, only one of the two is ever visible at
-        // once, toggled by UpdateTwitchTabUi.
         _btnTwitchDisconnect = new Button { Location = new Point(280, 12), Size = new Size(100, 26), Text = "Disconnect", Visible = false };
         _btnTwitchDisconnect.Click += (_, _) => OnTwitchDisconnectClicked();
         tab.Controls.Add(_btnTwitchDisconnect);
@@ -294,36 +313,60 @@ public partial class MainForm : Form
             AutoSize = true,
             Text = "Auto detect ads and run the overlay automatically",
             Checked = _settings.AutoDetectAds,
-            // Starts disabled, there's genuinely nothing for it to do
-            // without a connected account. UpdateTwitchTabUi flips this
-            // on once there's a real connection.
             Enabled = false
         };
         _chkAutoDetectAds.CheckedChanged += (_, _) =>
         {
             _settings.AutoDetectAds = _chkAutoDetectAds.Checked;
             JsonStore.Save(_settings, Paths.SettingsFile);
+            UpdateAutoDetectRunningState();
         };
         tab.Controls.Add(_chkAutoDetectAds);
 
+        _cmbAutoDetectTarget = new ComboBox
+        {
+            Location = new Point(12, 75),
+            Size = new Size(150, 23),
+            DropDownStyle = ComboBoxStyle.DropDownList,
+            Enabled = false
+        };
+        _cmbAutoDetectTarget.Items.Add("Bar only");
+        _cmbAutoDetectTarget.Items.Add("Radial only");
+        _cmbAutoDetectTarget.Items.Add("Both");
+        _cmbAutoDetectTarget.SelectedIndex = _settings.AutoDetectTarget switch { "Bar" => 0, "Radial" => 1, _ => 2 };
+        _cmbAutoDetectTarget.SelectedIndexChanged += (_, _) =>
+        {
+            _settings.AutoDetectTarget = _cmbAutoDetectTarget.SelectedIndex switch { 0 => "Bar", 1 => "Radial", _ => "Both" };
+            JsonStore.Save(_settings, Paths.SettingsFile);
+        };
+        tab.Controls.Add(_cmbAutoDetectTarget);
+
         var hint = new Label
         {
-            Location = new Point(12, 78),
-            Size = new Size(360, 40),
+            Location = new Point(12, 105),
+            Size = new Size(360, 34),
             ForeColor = Color.Gray,
             Font = new Font("Segoe UI", 7.5F),
             Text = "Turns on by itself the moment an account connects. Switch it off any time to go back to firing commands manually, e.g. from Streamer.bot."
         };
         tab.Controls.Add(hint);
+
+        // The live "since last ad / until next ad" readout, ticked
+        // once a second by _adCycleDisplayTimer. Values start out
+        // showing "no ad detected yet" until the sequencer's actually
+        // seen one for real.
+        tab.Controls.Add(new Label { Location = new Point(12, 145), AutoSize = true, ForeColor = Color.Gray, Text = "Last ad break:" });
+        _lblLastAd = new Label { Location = new Point(120, 145), AutoSize = true, Text = "No ad detected yet" };
+        tab.Controls.Add(_lblLastAd);
+
+        tab.Controls.Add(new Label { Location = new Point(12, 165), AutoSize = true, ForeColor = Color.Gray, Text = "Next ad (est.):" });
+        _lblNextAd = new Label { Location = new Point(120, 165), AutoSize = true, Text = "—" };
+        tab.Controls.Add(_lblNextAd);
     }
 
     // ------------------------------------------------------------
     // Twitch connect / disconnect
     // ------------------------------------------------------------
-    // Runs once at startup. If there's a saved token from a previous
-    // session, this refreshes it if it's close to expiring and updates
-    // the tab to reflect it, rather than starting every launch back at
-    // "Not connected" even though I connected days ago.
     private async Task LoadTwitchStateAsync()
     {
         TwitchTokenData? token = TwitchTokenStore.Load();
@@ -338,12 +381,6 @@ public partial class MainForm : Form
             TwitchTokenData? refreshed = await TwitchAuthService.RefreshAsync(token, CancellationToken.None);
             if (refreshed is null)
             {
-                // The refresh token's no good any more either, most
-                // likely it was revoked from Twitch's side (I clicked
-                // disconnect on Twitch's own site, or it just expired
-                // from long disuse). Nothing to do but forget it and
-                // ask to reconnect, rather than getting stuck retrying
-                // a token that's never going to work again.
                 TwitchTokenStore.Delete();
                 UpdateTwitchTabUi(null);
                 return;
@@ -353,6 +390,7 @@ public partial class MainForm : Form
 
         _twitchToken = token;
         UpdateTwitchTabUi(token);
+        UpdateAutoDetectRunningState();
     }
 
     private void OnTwitchConnectClicked()
@@ -365,14 +403,12 @@ public partial class MainForm : Form
             _twitchToken = dlg.Result;
             UpdateTwitchTabUi(_twitchToken);
 
-            // Turns on by itself the moment an account connects, as
-            // planned, still just a checkbox afterwards so it can be
-            // switched back off for manual control any time.
             _settings.AutoDetectAds = true;
             _chkAutoDetectAds.Checked = true;
             JsonStore.Save(_settings, Paths.SettingsFile);
 
             Logger.Log("[TWITCH]", $"Connected as {_twitchToken.DisplayName}");
+            UpdateAutoDetectRunningState();
         }
     }
 
@@ -390,12 +426,95 @@ public partial class MainForm : Form
         UpdateTwitchTabUi(null);
 
         Logger.Log("[TWITCH]", "Disconnected.");
+        UpdateAutoDetectRunningState();
     }
 
-    // The one place that decides what the Twitch tab actually shows,
-    // same pattern as RefreshStatusDisplay for the status hero, called
-    // from three places: startup, right after a successful connect,
-    // and right after a disconnect.
+    private async Task<TwitchTokenData?> GetValidTwitchTokenAsync()
+    {
+        if (_twitchToken is null) return null;
+        if (!_twitchToken.IsExpiredOrExpiringSoon) return _twitchToken;
+
+        TwitchTokenData? refreshed = await TwitchAuthService.RefreshAsync(_twitchToken, CancellationToken.None);
+        if (refreshed != null) _twitchToken = refreshed;
+        return refreshed;
+    }
+
+    private void UpdateAutoDetectRunningState()
+    {
+        bool shouldRun = _server.IsRunning && _twitchToken != null && _settings.AutoDetectAds;
+
+        Logger.Log("[TWITCH]", $"Auto detect check: shouldRun={shouldRun} (serverRunning={_server.IsRunning}, connected={_twitchToken != null}, autoDetectAds={_settings.AutoDetectAds})");
+
+        if (shouldRun)
+        {
+            _eventSubClient ??= new TwitchEventSubClient(GetValidTwitchTokenAsync);
+            _adSequencer ??= CreateAdSequencer();
+            _eventSubClient.Start();
+        }
+        else
+        {
+            _eventSubClient?.Stop();
+            _adSequencer?.Stop();
+        }
+    }
+
+    private TwitchAdSequencer CreateAdSequencer()
+    {
+        var sequencer = new TwitchAdSequencer(
+            getSettings: () => _settings,
+            getTarget: () => _settings.AutoDetectTarget switch
+            {
+                "Bar" => AdSequencerTarget.Bar,
+                "Radial" => AdSequencerTarget.Radial,
+                _ => AdSequencerTarget.Both
+            });
+        sequencer.Attach(_eventSubClient!);
+        return sequencer;
+    }
+
+    // Reads TwitchAdSequencer's two timestamps and turns them into
+    // readable "X ago" / "in X" text. Called once a second by
+    // _adCycleDisplayTimer, and safe to call even when _adSequencer
+    // hasn't been created yet (nothing's connected, or auto detect's
+    // never been switched on this session).
+    private void RefreshAdCycleDisplay()
+    {
+        if (_adSequencer is null)
+        {
+            _lblLastAd.Text = "No ad detected yet";
+            _lblNextAd.Text = "—";
+            return;
+        }
+
+        _lblLastAd.Text = _adSequencer.LastAdStartedUtc is { } last
+            ? $"{FormatSpan(DateTime.UtcNow - last)} ago"
+            : "No ad detected yet";
+
+        if (_adSequencer.NextAdEstimatedUtc is { } next)
+        {
+            TimeSpan remaining = next - DateTime.UtcNow;
+            _lblNextAd.Text = remaining > TimeSpan.Zero
+                ? $"in {FormatSpan(remaining)}"
+                : "any moment now";
+        }
+        else
+        {
+            _lblNextAd.Text = "—";
+        }
+    }
+
+    // A short "Xm Ys" style readout rather than a full hh:mm:ss, this
+    // is a glance-at-it status line, not a precise countdown, doesn't
+    // need leading zeroes or an hours column for anything under an
+    // hour, which covers the vast majority of ad cycles anyway.
+    private static string FormatSpan(TimeSpan span)
+    {
+        if (span < TimeSpan.Zero) span = TimeSpan.Zero;
+        return span.TotalHours >= 1
+            ? $"{(int)span.TotalHours}h {span.Minutes}m {span.Seconds}s"
+            : $"{span.Minutes}m {span.Seconds}s";
+    }
+
     private void UpdateTwitchTabUi(TwitchTokenData? token)
     {
         if (token is null)
@@ -404,7 +523,8 @@ public partial class MainForm : Form
             _lblTwitchStatus.ForeColor = Color.Gray;
             _btnTwitchConnect.Visible = true;
             _btnTwitchDisconnect.Visible = false;
-            _chkAutoDetectAds.Enabled = false;
+            _chkAutoDetectAds.Enabled = true;
+            _cmbAutoDetectTarget.Enabled = true;
             _chkAutoDetectAds.Checked = false;
         }
         else
@@ -414,6 +534,7 @@ public partial class MainForm : Form
             _btnTwitchConnect.Visible = false;
             _btnTwitchDisconnect.Visible = true;
             _chkAutoDetectAds.Enabled = true;
+            _cmbAutoDetectTarget.Enabled = true;
         }
     }
 
@@ -525,6 +646,7 @@ public partial class MainForm : Form
         if (InvokeRequired) { Invoke(() => OnServerStatusChanged(isRunning)); return; }
         if (isRunning) _hasErrorSinceStart = false;
         RefreshStatusDisplay();
+        UpdateAutoDetectRunningState();
     }
 
     private void OnErrorLogged()
@@ -594,7 +716,7 @@ public partial class MainForm : Form
         }
         if (!TimeParsing.TryParseDuration(_txtAdFree.Text, out int adFreeSeconds, out string? error2))
         {
-            MessageBox.Show(this, error2, "Ad free interval", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            MessageBox.Show(this, error2, "Time between ads", MessageBoxButtons.OK, MessageBoxIcon.Warning);
             return;
         }
 
@@ -667,6 +789,8 @@ public partial class MainForm : Form
         }
 
         Logger.ErrorLogged -= OnErrorLogged;
+        _adCycleDisplayTimer.Stop();
+        _adCycleDisplayTimer.Dispose();
         _server.Stop();
         _trayIcon.Visible = false;
         _trayIcon.Dispose();
