@@ -1,0 +1,31 @@
+﻿## Build output
+bin/
+obj/
+publish/
+
+## User-specific / machine-specific files (never share these)
+*.user
+*.suo
+
+## Rider / JetBrains project settings
+.idea/
+*.DotSettings.user
+
+# Exception: keep the spell-checker dictionary if you add custom words
+# later (the old console project did this too — it's just a word list,
+# genuinely useful to share so Rider doesn't flag your own terms as
+# typos on a clean clone).
+!.idea/dictionaries/
+!.idea/dictionaries/*.xml
+
+## OS clutter
+Thumbs.db
+.DS_Store
+
+## Twitch / secrets (nothing here yet, but never let these slip in)
+.env
+*.env
+secrets.json
+appsettings.*.json
+!appsettings.json
+*.token
