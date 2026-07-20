@@ -7,18 +7,49 @@
         <UseWindowsForms>true</UseWindowsForms>
         <ImplicitUsings>enable</ImplicitUsings>
         <ApplicationIcon>Assets\app.ico</ApplicationIcon>
+
+        <!--
+          Version metadata. Version itself allows a prerelease suffix
+          like "-alpha", but AssemblyVersion and FileVersion don't,
+          they need to be plain four-part numbers, that's a hard rule
+          of the .NET assembly format itself, not a style choice. All
+          three should still move together whenever I bump this.
+        -->
+        <Version>0.1.0-alpha</Version>
+        <AssemblyVersion>0.1.0.0</AssemblyVersion>
+        <FileVersion>0.1.0.0</FileVersion>
+
+        <!--
+          Shows up in Explorer's file Properties -> Details tab, and is
+          what most "what did I actually download" questions get
+          answered from before anyone opens the app itself.
+        -->
+        <Product>Ad Break Timer</Product>
+        <Company>Kaydee.Codes</Company>
+        <Authors>Kaydee.Codes</Authors>
+        <Copyright>Copyright (c) Kaydee.Codes</Copyright>
+        <Description>A small Windows control panel for OBS ad break overlays, driven by simple URL commands.</Description>
+
+        <!--
+          Publish settings for the eventual single-file self-contained
+          build. Doesn't affect normal debugging, only dotnet publish.
+        -->
+        <PublishSingleFile>true</PublishSingleFile>
+        <SelfContained>true</SelfContained>
+        <RuntimeIdentifier>win-x64</RuntimeIdentifier>
+        <IncludeNativeLibrariesForSelfExtract>true</IncludeNativeLibrariesForSelfExtract>
     </PropertyGroup>
 
     <ItemGroup>
-      <Folder Include="Assets\" />
+        <Folder Include="Assets\" />
         <EmbeddedResource Include="Web\bar.html" />
         <EmbeddedResource Include="Web\radial.html" />
     </ItemGroup>
 
     <ItemGroup>
-      <Compile Update="Gui\OverlaySettingsForm.cs">
-        <SubType>Form</SubType>
-      </Compile>
+        <Compile Update="Gui\OverlaySettingsForm.cs">
+            <SubType>Form</SubType>
+        </Compile>
     </ItemGroup>
 
 </Project>

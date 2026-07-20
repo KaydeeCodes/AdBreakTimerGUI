@@ -9,39 +9,17 @@ namespace AdBreakTimerGUI;
 
 public partial class MainForm : Form
 {
-    // The web server the whole app revolves around. I create it once
-    // here and keep it for the form's whole lifetime, starting and
-    // stopping it as I like rather than recreating it every time.
     private readonly WebServerHost _server = new();
-
-    // Used by the Test buttons to fire a real HTTP request at my own
-    // server, exactly the same way Streamer.bot would. One shared
-    // instance rather than creating a new HttpClient per click, that's
-    // the recommended pattern, a fresh HttpClient per call can exhaust
-    // sockets under repeated use even though this app will only ever
-    // fire a handful of these.
     private static readonly HttpClient TestHttpClient = new();
-
-    // Loaded once on startup, saved back whenever something changes it,
-    // the port after a successful start, the ad timing when I click
-    // Save settings, and so on.
     private AppSettings _settings = new();
 
-    // The three colours the LED can actually be. Pulled out as fields
-    // rather than typed inline everywhere, so if I ever want to tweak
-    // the exact shade there's one place to do it.
     private static readonly Color ColorRunningOk = Color.ForestGreen;
-    private static readonly Color ColorRunningWithErrors = Color.FromArgb(0xF5, 0xA6, 0x23); // amber, matches the mockup's warning colour
+    private static readonly Color ColorRunningWithErrors = Color.FromArgb(0xF5, 0xA6, 0x23);
     private static readonly Color ColorStopped = Color.Firebrick;
 
-    // True once at least one [ERROR] has been logged since the server
-    // last started. Reset back to false every time StartServer()
-    // succeeds, so a fresh start always begins green even if the
-    // previous run ended with errors logged.
     private bool _hasErrorSinceStart;
 
-    // Controls I need to reach from more than one method are kept as
-    // fields. Anything only used inside BuildUi stays a local variable.
+    // Controls I need to reach from more than one method.
     private Panel _ledPanel = null!;
     private Label _lblStatus = null!;
     private Label _lblPort = null!;
@@ -57,19 +35,12 @@ public partial class MainForm : Form
     private Button _btnSaveSettings = null!;
 
     private NotifyIcon _trayIcon = null!;
-
-    // Set true only by the tray menu's Exit item. This is how I tell
-    // "the X button was clicked, minimise to tray" apart from "I
-    // actually want this to quit" in OnFormClosing further down.
     private bool _reallyExiting;
 
     public MainForm()
     {
         InitializeComponent();
 
-        // Everything on disk lives under %AppData%\AdBreakTimer, see
-        // Config.Paths for why. I make sure that folder exists and the
-        // log file is started fresh before anything else touches either.
         Paths.EnsureConfigDirExists();
         Logger.StartFresh();
 
@@ -78,26 +49,9 @@ public partial class MainForm : Form
         BuildUi();
         BuildTrayIcon();
 
-        // I want the traffic light and button text to update the moment
-        // the server's state actually changes, from whichever thread
-        // that happens on, rather than manually flipping the UI in
-        // every place that calls Start() or Stop().
         _server.StatusChanged += OnServerStatusChanged;
-
-        // And the same for errors, anything that calls Logger.Log with
-        // an [ERROR] tag flips the light to amber while the server's
-        // still running. See Logger.cs for why this lives there rather
-        // than being tracked separately in several places.
         Logger.ErrorLogged += OnErrorLogged;
 
-        // The LED and status text were previously only ever updated by
-        // OnServerStatusChanged, which only fires once Start() or
-        // Stop() actually runs. With auto start off, neither runs at
-        // launch, so the LED was sitting at whatever colour BuildUi
-        // happened to create it with, regardless of what the label next
-        // to it said. Calling this once here makes sure what's on
-        // screen always matches the server's real state from the very
-        // first frame, not just after the first state change.
         RefreshStatusDisplay();
 
         if (_settings.StartAutomatically)
@@ -107,69 +61,35 @@ public partial class MainForm : Form
     // ------------------------------------------------------------
     // Building the window
     // ------------------------------------------------------------
-    // I'm laying this out in code rather than the visual designer. The
-    // window's fixed and doesn't need to resize dynamically, so a
-    // simple running Y cursor is easier for me to read back later than
-    // hunting through a hidden .designer.cs file to work out what's
-    // actually where.
+    // Reworked into a fixed header (status, quick toggles) plus a
+    // TabControl for everything else, rather than one long stack of
+    // sections. The old layout kept growing every time I added
+    // something, this version has room for the Twitch tab to grow on
+    // its own without pushing the Links or Timing tabs further down
+    // the screen. Still built entirely in code, no visual designer.
     private void BuildUi()
     {
         Text = "Ad Break Timer";
-        ClientSize = new Size(440, 700);
         FormBorderStyle = FormBorderStyle.FixedSingle;
         MaximizeBox = false;
         StartPosition = FormStartPosition.CenterScreen;
         Font = new Font("Segoe UI", 9F);
-
-        // I'm extracting this from the exe's own icon resource rather
-        // than loading Assets/app.ico separately. ApplicationIcon in
-        // the csproj is what actually embeds it into the exe in the
-        // first place, this just reads it back out, so there's only
-        // ever one file to swap if I change the icon later.
         Icon = Icon.ExtractAssociatedIcon(Application.ExecutablePath);
 
         int y = 16;
 
         // ---- Status row: LED, status text, port, start/stop button ----
-        // I'm not setting BackColor here any more, it used to be
-        // hardcoded to green, which is exactly what caused the LED to
-        // show the wrong colour on a launch with auto start off. The
-        // real colour gets set once by RefreshStatusDisplay() right
-        // after BuildUi runs, and from then on by whatever actually
-        // changes (OnServerStatusChanged / OnErrorLogged).
-        _ledPanel = new Panel
-        {
-            Location = new Point(16, y),
-            Size = new Size(16, 16)
-        };
-        // A plain Panel is a square by default. I paint it as a circle
-        // instead so it reads as a status dot, same idea as the LED in
-        // the HTML mockup.
+        _ledPanel = new Panel { Location = new Point(16, y), Size = new Size(16, 16) };
         _ledPanel.Paint += (_, e) =>
         {
             using var brush = new SolidBrush(_ledPanel.BackColor);
             e.Graphics.FillEllipse(brush, 0, 0, _ledPanel.Width - 1, _ledPanel.Height - 1);
         };
 
-        _lblStatus = new Label
-        {
-            Location = new Point(40, y - 2),
-            AutoSize = true,
-            Font = new Font("Segoe UI", 10F, FontStyle.Bold)
-        };
+        _lblStatus = new Label { Location = new Point(40, y - 2), AutoSize = true, Font = new Font("Segoe UI", 10F, FontStyle.Bold) };
+        _lblPort = new Label { Location = new Point(40, y + 18), AutoSize = true, ForeColor = Color.Gray };
 
-        _lblPort = new Label
-        {
-            Location = new Point(40, y + 18),
-            AutoSize = true,
-            ForeColor = Color.Gray
-        };
-
-        _btnToggle = new Button
-        {
-            Location = new Point(300, y - 4),
-            Size = new Size(120, 30)
-        };
+        _btnToggle = new Button { Location = new Point(300, y - 4), Size = new Size(120, 30) };
         _btnToggle.Click += (_, _) => ToggleServer();
 
         Controls.Add(_ledPanel);
@@ -178,200 +98,61 @@ public partial class MainForm : Form
         Controls.Add(_btnToggle);
 
         y += 50;
-        Controls.Add(NewSeparator(y));
+        Controls.Add(NewSeparator(this, y));
         y += 16;
 
-        // ---- Checkboxes ----
-        _chkAutoStart = new CheckBox
-        {
-            Location = new Point(16, y),
-            AutoSize = true,
-            Text = "Start automatically on launch",
-            Checked = _settings.StartAutomatically
-        };
+        // ---- Quick toggles, side by side to keep this to one row ----
+        _chkAutoStart = new CheckBox { Location = new Point(16, y), AutoSize = true, Text = "Start on launch", Checked = _settings.StartAutomatically };
         _chkAutoStart.CheckedChanged += (_, _) =>
         {
             _settings.StartAutomatically = _chkAutoStart.Checked;
             JsonStore.Save(_settings, Paths.SettingsFile);
         };
+        var tipAutoStart = new ToolTip();
+        tipAutoStart.SetToolTip(_chkAutoStart, "Starts the service the moment the app opens");
         Controls.Add(_chkAutoStart);
-        y += 26;
 
-        _chkMinimizeTray = new CheckBox
-        {
-            Location = new Point(16, y),
-            AutoSize = true,
-            Text = "Minimise to tray when closed",
-            Checked = _settings.MinimizeToTrayOnClose
-        };
+        _chkMinimizeTray = new CheckBox { Location = new Point(180, y), AutoSize = true, Text = "Minimise to tray", Checked = _settings.MinimizeToTrayOnClose };
         _chkMinimizeTray.CheckedChanged += (_, _) =>
         {
             _settings.MinimizeToTrayOnClose = _chkMinimizeTray.Checked;
             JsonStore.Save(_settings, Paths.SettingsFile);
         };
+        var tipMinTray = new ToolTip();
+        tipMinTray.SetToolTip(_chkMinimizeTray, "The X button hides to the tray instead of quitting");
         Controls.Add(_chkMinimizeTray);
-        y += 34;
 
-        Controls.Add(NewSeparator(y));
+        y += 26;
+        Controls.Add(NewSeparator(this, y));
         y += 16;
 
-        // ---- Overlay & API links ----
-        Controls.Add(NewSectionLabel("OVERLAY && API LINKS", y));
-        y += 22;
+        // ---- Tab control: Links / Timing / Appearance / Twitch ----
+        var tabs = new TabControl { Location = new Point(16, y), Size = new Size(404, 236) };
 
-        _txtBarUrl = NewLinkRow("Bar overlay", y, true, out Button copyBar, out Button? testBar);
-        y += 46;
-        _txtRadialUrl = NewLinkRow("Radial overlay", y, true, out Button copyRadial, out Button? testRadial);
-        y += 46;
-        _txtApiExample = NewLinkRow("Example go command", y, false, out Button copyApi, out _);
-        y += 46;
+        var linksTab = new TabPage("Links");
+        var timingTab = new TabPage("Timing");
+        var appearanceTab = new TabPage("Appearance");
+        var twitchTab = new TabPage("Twitch");
+        tabs.TabPages.Add(linksTab);
+        tabs.TabPages.Add(timingTab);
+        tabs.TabPages.Add(appearanceTab);
+        tabs.TabPages.Add(twitchTab);
 
-        copyBar.Click += (_, _) => CopyToClipboard(_txtBarUrl.Text);
-        copyRadial.Click += (_, _) => CopyToClipboard(_txtRadialUrl.Text);
-        copyApi.Click += (_, _) => CopyToClipboard(_txtApiExample.Text);
+        BuildLinksTab(linksTab);
+        BuildTimingTab(timingTab);
+        BuildAppearanceTab(appearanceTab);
+        BuildTwitchTab(twitchTab);
 
-        // The whole reason these exist: positioning a Browser Source
-        // in OBS with nothing actually visible in it is genuinely
-        // awkward. This fires a plain 1 hour countdown so there's
-        // something on screen long enough to drag and resize, without
-        // needing Streamer.bot or a browser tab open just to test.
-        testBar!.Click += (_, _) => FireTestCountdown("bar");
-        testRadial!.Click += (_, _) => FireTestCountdown("radial");
-
-        Controls.Add(NewSeparator(y));
-        y += 16;
-
-        // ---- Ad timing ----
-        Controls.Add(NewSectionLabel("AD TIMING", y));
-        y += 22;
-
-        Controls.Add(new Label { Location = new Point(16, y + 3), AutoSize = true, Text = "Ad break length" });
-        _txtAdBreak = new TextBox
-        {
-            Location = new Point(320, y),
-            Size = new Size(100, 23),
-            TextAlign = HorizontalAlignment.Center,
-            Text = TimeParsing.SecsToHms(_settings.AdBreakSeconds)
-        };
-        Controls.Add(_txtAdBreak);
-        y += 32;
-
-        Controls.Add(new Label { Location = new Point(16, y + 3), AutoSize = true, Text = "Ad free interval" });
-        _txtAdFree = new TextBox
-        {
-            Location = new Point(320, y),
-            Size = new Size(100, 23),
-            TextAlign = HorizontalAlignment.Center,
-            Text = TimeParsing.SecsToHms(_settings.AdFreeSeconds)
-        };
-        Controls.Add(_txtAdFree);
-        y += 32;
-
-        // A plain number of seconds rather than mm:ss, this is meant
-        // to be a short gap (a handful of seconds), not a proper
-        // duration, so a spinner felt like the more honest control for
-        // what it actually is. Not used by anything yet, see the
-        // comment on AppSettings.AdBufferSeconds for why it's here
-        // ahead of the code that'll actually read it.
-        Controls.Add(new Label { Location = new Point(16, y + 3), Size = new Size(290, 20), Text = "Gap before ad free countdown (seconds)" });
-        _numAdBuffer = new NumericUpDown
-        {
-            Location = new Point(320, y),
-            Size = new Size(100, 23),
-            Minimum = 0,
-            Maximum = 300,
-            Value = Math.Clamp(_settings.AdBufferSeconds, 0, 300)
-        };
-        Controls.Add(_numAdBuffer);
-        y += 36;
-
-        _btnSaveSettings = new Button
-        {
-            Location = new Point(16, y),
-            Size = new Size(404, 30),
-            Text = "Save settings"
-        };
-        _btnSaveSettings.Click += (_, _) => SaveAdTimingSettings();
-        Controls.Add(_btnSaveSettings);
-        y += 46;
-
-        Controls.Add(NewSeparator(y));
-        y += 16;
-
-        // ---- Overlay appearance ----
-        Controls.Add(NewSectionLabel("OVERLAY APPEARANCE", y));
-        y += 22;
-
-        Button btnOverlaySettings = new()
-        {
-            Location = new Point(16, y),
-            Size = new Size(404, 30),
-            Text = "Bar / Radial settings..."
-        };
-        btnOverlaySettings.Click += (_, _) => OpenOverlaySettings();
-        Controls.Add(btnOverlaySettings);
-        y += 46;
-
-        Controls.Add(NewSeparator(y));
-        y += 16;
-
-        // ---- Twitch account (locked for now, this is the phase two bit) ----
-        Controls.Add(NewSectionLabel("TWITCH ACCOUNT", y));
-        y += 22;
-
-        Controls.Add(new Label { Location = new Point(16, y + 3), AutoSize = true, Text = "Not connected", ForeColor = Color.Gray });
-        Button btnTwitchConnect = new()
-        {
-            Location = new Point(320, y),
-            Size = new Size(100, 26),
-            Text = "Connect",
-            Enabled = false
-        };
-        var tip = new ToolTip();
-        tip.SetToolTip(btnTwitchConnect, "Coming in a future update");
-        Controls.Add(btnTwitchConnect);
-        y += 32;
-
-        // Cosmetic only for now, greyed out until there's an actual
-        // Twitch connection behind it. Once EventSub is wired up, this
-        // is what flips the app from "wait for a URL command" to
-        // "watch channel.ad_break.begin and fire go automatically".
-        CheckBox chkAutoDetectAds = new()
-        {
-            Location = new Point(16, y),
-            AutoSize = true,
-            Text = "Auto detect ads and start the overlay automatically",
-            Checked = _settings.AutoDetectAds,
-            Enabled = false
-        };
-        var tipAuto = new ToolTip();
-        tipAuto.SetToolTip(chkAutoDetectAds, "Needs a connected Twitch account, coming in a future update");
-        Controls.Add(chkAutoDetectAds);
-        y += 32;
-
-        Controls.Add(NewSeparator(y));
-        y += 16;
+        Controls.Add(tabs);
+        y += tabs.Height + 16;
 
         // ---- Footer: open config folder / open log file ----
-        Button btnOpenConfig = new()
-        {
-            Location = new Point(16, y),
-            Size = new Size(195, 30),
-            Text = "Open config folder"
-        };
+        Button btnOpenConfig = new() { Location = new Point(16, y), Size = new Size(195, 30), Text = "Open config folder" };
         btnOpenConfig.Click += (_, _) => Process.Start("explorer.exe", Paths.ConfigDir);
 
-        Button btnOpenLog = new()
-        {
-            Location = new Point(225, y),
-            Size = new Size(195, 30),
-            Text = "Open log file"
-        };
+        Button btnOpenLog = new() { Location = new Point(225, y), Size = new Size(195, 30), Text = "Open log file" };
         btnOpenLog.Click += (_, _) =>
         {
-            // If the log somehow doesn't exist yet, opening it directly
-            // would just error. I create an empty one first so the
-            // button always does something sensible.
             if (!File.Exists(Paths.LogFile)) File.WriteAllText(Paths.LogFile, "");
             Process.Start(new ProcessStartInfo(Paths.LogFile) { UseShellExecute = true });
         };
@@ -380,7 +161,7 @@ public partial class MainForm : Form
         Controls.Add(btnOpenLog);
         y += 40;
 
-        // ---- Footer credit, same line I put at the bottom of all my tools ----
+        // ---- Footer credit ----
         var lblFooter = new LinkLabel
         {
             Location = new Point(16, y),
@@ -389,13 +170,8 @@ public partial class MainForm : Form
             ForeColor = Color.Gray,
             Text = "Made by Kaydee.Codes - Free to use, no data collected, ever."
         };
-        // Only the "Kaydee.Codes" part of the string should actually be
-        // a clickable link. LinkArea takes a start index and a length
-        // into the text above, "Made by " is 8 characters long, and
-        // "Kaydee.Codes" is 12 characters long.
         lblFooter.LinkArea = new LinkArea(8, 12);
-        lblFooter.LinkClicked += (_, _) =>
-            Process.Start(new ProcessStartInfo("https://kaydee.codes/") { UseShellExecute = true });
+        lblFooter.LinkClicked += (_, _) => Process.Start(new ProcessStartInfo("https://kaydee.codes/") { UseShellExecute = true });
         Controls.Add(lblFooter);
         y += 26;
 
@@ -404,65 +180,171 @@ public partial class MainForm : Form
         RefreshLinkText();
     }
 
-    // A thin horizontal line, purely to break the window into the same
-    // sections as the mockup.
-    private Control NewSeparator(int y) => new Panel
+    // ------------------------------------------------------------
+    // Tab contents
+    // ------------------------------------------------------------
+    private void BuildLinksTab(TabPage tab)
+    {
+        int y = 12;
+        _txtBarUrl = NewLinkRow(tab, "Bar overlay", y, true, out Button copyBar, out Button? testBar);
+        y += 46;
+        _txtRadialUrl = NewLinkRow(tab, "Radial overlay", y, true, out Button copyRadial, out Button? testRadial);
+        y += 46;
+        _txtApiExample = NewLinkRow(tab, "Example go command", y, false, out Button copyApi, out _);
+        y += 46;
+
+        copyBar.Click += (_, _) => CopyToClipboard(_txtBarUrl.Text);
+        copyRadial.Click += (_, _) => CopyToClipboard(_txtRadialUrl.Text);
+        copyApi.Click += (_, _) => CopyToClipboard(_txtApiExample.Text);
+        testBar!.Click += (_, _) => FireTestCountdown("bar");
+        testRadial!.Click += (_, _) => FireTestCountdown("radial");
+
+        var hint = new Label
+        {
+            Location = new Point(12, y),
+            Size = new Size(360, 40),
+            ForeColor = Color.Gray,
+            Font = new Font("Segoe UI", 7.5F),
+            Text = "Test starts a plain 30 min countdown, just enough to position the Browser Source in OBS."
+        };
+        tab.Controls.Add(hint);
+    }
+
+    private void BuildTimingTab(TabPage tab)
+    {
+        int y = 16;
+        tab.Controls.Add(new Label { Location = new Point(12, y + 3), AutoSize = true, Text = "Ad break length" });
+        _txtAdBreak = new TextBox
+        {
+            Location = new Point(280, y),
+            Size = new Size(100, 23),
+            TextAlign = HorizontalAlignment.Center,
+            Text = TimeParsing.SecsToHms(_settings.AdBreakSeconds)
+        };
+        tab.Controls.Add(_txtAdBreak);
+        y += 32;
+
+        tab.Controls.Add(new Label { Location = new Point(12, y + 3), AutoSize = true, Text = "Ad free interval" });
+        _txtAdFree = new TextBox
+        {
+            Location = new Point(280, y),
+            Size = new Size(100, 23),
+            TextAlign = HorizontalAlignment.Center,
+            Text = TimeParsing.SecsToHms(_settings.AdFreeSeconds)
+        };
+        tab.Controls.Add(_txtAdFree);
+        y += 32;
+
+        tab.Controls.Add(new Label { Location = new Point(12, y + 3), Size = new Size(260, 20), Text = "Gap before ad free countdown (s)" });
+        _numAdBuffer = new NumericUpDown
+        {
+            Location = new Point(280, y),
+            Size = new Size(100, 23),
+            Minimum = 0,
+            Maximum = 300,
+            Value = Math.Clamp(_settings.AdBufferSeconds, 0, 300)
+        };
+        tab.Controls.Add(_numAdBuffer);
+        y += 36;
+
+        _btnSaveSettings = new Button { Location = new Point(12, y), Size = new Size(368, 30), Text = "Save settings" };
+        _btnSaveSettings.Click += (_, _) => SaveAdTimingSettings();
+        tab.Controls.Add(_btnSaveSettings);
+    }
+
+    private void BuildAppearanceTab(TabPage tab)
+    {
+        var hint = new Label
+        {
+            Location = new Point(12, 12),
+            Size = new Size(360, 40),
+            ForeColor = Color.Gray,
+            Font = new Font("Segoe UI", 8F),
+            Text = "Bar and radial ring appearance, direction, size, thickness, rotation, and colours, in their own window since there's a fair bit to each."
+        };
+        tab.Controls.Add(hint);
+
+        Button btnOverlaySettings = new() { Location = new Point(12, 60), Size = new Size(368, 30), Text = "Bar / Radial settings..." };
+        btnOverlaySettings.Click += (_, _) => OpenOverlaySettings();
+        tab.Controls.Add(btnOverlaySettings);
+    }
+
+    private void BuildTwitchTab(TabPage tab)
+    {
+        tab.Controls.Add(new Label { Location = new Point(12, 15), AutoSize = true, Text = "Not connected", ForeColor = Color.Gray });
+        Button btnTwitchConnect = new() { Location = new Point(280, 12), Size = new Size(100, 26), Text = "Connect", Enabled = false };
+        var tip = new ToolTip();
+        tip.SetToolTip(btnTwitchConnect, "Coming in a future update");
+        tab.Controls.Add(btnTwitchConnect);
+
+        CheckBox chkAutoDetectAds = new()
+        {
+            Location = new Point(12, 50),
+            AutoSize = true,
+            Text = "Auto detect ads and run the overlay automatically",
+            Checked = _settings.AutoDetectAds,
+            Enabled = false
+        };
+        var tipAuto = new ToolTip();
+        tipAuto.SetToolTip(chkAutoDetectAds, "Needs a connected Twitch account, coming in a future update");
+        tab.Controls.Add(chkAutoDetectAds);
+
+        var hint = new Label
+        {
+            Location = new Point(12, 78),
+            Size = new Size(360, 40),
+            ForeColor = Color.Gray,
+            Font = new Font("Segoe UI", 7.5F),
+            Text = "Turns on by itself the moment an account connects. Switch it off any time to go back to firing commands manually, e.g. from Streamer.bot."
+        };
+        tab.Controls.Add(hint);
+    }
+
+    // ------------------------------------------------------------
+    // Shared small helpers
+    // ------------------------------------------------------------
+    private static Control NewSeparator(Control parent, int y) => new Panel
     {
         Location = new Point(16, y),
         Size = new Size(404, 1),
         BackColor = Color.Gainsboro
     };
 
-    // A small grey, capitalised section heading, matching the mockup.
-    private Control NewSectionLabel(string text, int y) => new Label
+    // One row inside a tab: a caption, a read only text box holding
+    // the URL, a Copy button, and optionally a Test button. Same idea
+    // as before, just now taking a parent so it can add itself to a
+    // TabPage instead of always assuming it's going straight onto the
+    // form, and using slightly tighter margins since a TabPage has
+    // less usable width than the form itself once its own border is
+    // accounted for.
+    private TextBox NewLinkRow(Control parent, string caption, int y, bool showTestButton, out Button copyButton, out Button? testButton)
     {
-        Location = new Point(16, y),
-        AutoSize = true,
-        ForeColor = Color.Gray,
-        Font = new Font("Segoe UI", 8F, FontStyle.Bold),
-        Text = text
-    };
+        parent.Controls.Add(new Label { Location = new Point(12, y), AutoSize = true, ForeColor = Color.Gray, Text = caption });
 
-    // One row in the overlay & API links section: a caption, a read
-    // only text box holding the URL, a Copy button, and optionally a
-    // Test button. showTestButton controls both whether the Test
-    // button exists at all and how much room the text box gets, since
-    // the example command row doesn't need one (there's nothing useful
-    // for it to test that Copy doesn't already cover) and gets the
-    // extra width back instead.
-    private TextBox NewLinkRow(string caption, int y, bool showTestButton, out Button copyButton, out Button? testButton)
-    {
-        Controls.Add(new Label { Location = new Point(16, y), AutoSize = true, ForeColor = Color.Gray, Text = caption });
-
-        int textBoxWidth = showTestButton ? 248 : 330;
+        int textBoxWidth = showTestButton ? 210 : 290;
 
         var textBox = new TextBox
         {
-            Location = new Point(16, y + 16),
+            Location = new Point(12, y + 16),
             Size = new Size(textBoxWidth, 23),
             ReadOnly = true,
             Text = "not started yet"
         };
-        Controls.Add(textBox);
+        parent.Controls.Add(textBox);
 
-        int copyX = 16 + textBoxWidth + 6;
+        int copyX = 12 + textBoxWidth + 6;
         copyButton = new Button
         {
             Location = new Point(copyX, y + 15),
-            Size = new Size(showTestButton ? 60 : 68, 25),
+            Size = new Size(showTestButton ? 50 : 64, 25),
             Text = "Copy"
         };
-        Controls.Add(copyButton);
+        parent.Controls.Add(copyButton);
 
         if (showTestButton)
         {
-            testButton = new Button
-            {
-                Location = new Point(copyX + 66, y + 15),
-                Size = new Size(66, 25),
-                Text = "Test"
-            };
-            Controls.Add(testButton);
+            testButton = new Button { Location = new Point(copyX + 54, y + 15), Size = new Size(50, 25), Text = "Test" };
+            parent.Controls.Add(testButton);
         }
         else
         {
@@ -478,13 +360,6 @@ public partial class MainForm : Form
         Clipboard.SetText(text);
     }
 
-    // Fires a plain 1 hour go command at whichever overlay was clicked,
-    // "bar" or "radial", using the real HTTP API, exactly the way
-    // Streamer.bot would. Deliberately not passing colour or direction
-    // here, so it shows up using whatever's already configured in Bar
-    // / Radial settings, this is purely to give me something on screen
-    // long enough to drag and resize the Browser Source in OBS, not to
-    // demonstrate the ad break behaviour itself.
     private async void FireTestCountdown(string overlay)
     {
         if (!_server.IsRunning)
@@ -494,7 +369,7 @@ public partial class MainForm : Form
             return;
         }
 
-        string url = $"http://localhost:{_server.Port}/{overlay}/api?cmd=go&t=00:30:00&color=%2300ff00";
+        string url = $"http://localhost:{_server.Port}/{overlay}/api?cmd=go&t=00:30:00";
         try
         {
             await TestHttpClient.GetAsync(url);
@@ -521,7 +396,7 @@ public partial class MainForm : Form
         try
         {
             _server.Start(_settings.Port);
-            _settings.Port = _server.Port; // remember whichever port it actually bound to
+            _settings.Port = _server.Port;
             JsonStore.Save(_settings, Paths.SettingsFile);
             RefreshLinkText();
         }
@@ -535,50 +410,20 @@ public partial class MainForm : Form
 
     private void StopServer() => _server.Stop();
 
-    // WebServerHost raises this from its own background task, not the
-    // UI thread, so I have to marshal back onto the UI thread with
-    // Invoke before touching any control here. This is the single
-    // easiest WinForms mistake to make, leaving this comment as a
-    // reminder to myself for next time I touch this method.
     private void OnServerStatusChanged(bool isRunning)
     {
-        if (InvokeRequired)
-        {
-            Invoke(() => OnServerStatusChanged(isRunning));
-            return;
-        }
-
-        // A fresh start always begins green, even if the previous run
-        // ended with errors logged. Only reset this on the transition
-        // into "running", not on every call, otherwise a Stop() right
-        // after an error would also wipe the flag before I've had a
-        // chance to see it.
+        if (InvokeRequired) { Invoke(() => OnServerStatusChanged(isRunning)); return; }
         if (isRunning) _hasErrorSinceStart = false;
-
         RefreshStatusDisplay();
     }
 
-    // Raised by Logger whenever an [ERROR] line gets written anywhere
-    // in the app. Same threading caveat as OnServerStatusChanged, this
-    // can fire from a background thread.
     private void OnErrorLogged()
     {
-        if (InvokeRequired)
-        {
-            Invoke(OnErrorLogged);
-            return;
-        }
-
+        if (InvokeRequired) { Invoke(OnErrorLogged); return; }
         _hasErrorSinceStart = true;
         RefreshStatusDisplay();
     }
 
-    // The single place that decides what the LED, status label, port
-    // label, toggle button, and tray icon text should actually say,
-    // based on _server.IsRunning and _hasErrorSinceStart. Called from
-    // three places: once right after BuildUi (so the very first frame
-    // is correct even if auto start is off), and again whenever either
-    // of those two things changes.
     private void RefreshStatusDisplay()
     {
         if (!_server.IsRunning)
@@ -645,17 +490,11 @@ public partial class MainForm : Form
 
         _settings.AdBreakSeconds = adBreakSeconds;
         _settings.AdFreeSeconds = adFreeSeconds;
-        // No validation needed here, NumericUpDown already constrains
-        // this to 0-300 on its own, unlike the two text boxes above
-        // which accept free text and need TryParseDuration to catch
-        // rubbish input.
         _settings.AdBufferSeconds = (int)_numAdBuffer.Value;
         JsonStore.Save(_settings, Paths.SettingsFile);
 
         RefreshLinkText();
 
-        // A little "Saved" confirmation on the button itself, echoing
-        // the mockup, reverting back after just over a second.
         _btnSaveSettings.Text = "Saved";
         var revertTimer = new System.Windows.Forms.Timer { Interval = 1200 };
         revertTimer.Tick += (_, _) =>
@@ -667,10 +506,6 @@ public partial class MainForm : Form
         revertTimer.Start();
     }
 
-    // Opens the Bar/Radial appearance settings as a modal dialog. I'm
-    // not keeping a field for this one since it's only ever open for
-    // as long as I'm using it, unlike the tray icon or the server,
-    // which live for the whole lifetime of the app.
     private void OpenOverlaySettings()
     {
         using var dlg = new OverlaySettingsForm();
@@ -712,11 +547,6 @@ public partial class MainForm : Form
         Close();
     }
 
-    // I want the window's X button to minimise to tray rather than
-    // quit outright, since the whole point of this app is to sit in
-    // the background while OBS and Streamer.bot are talking to it. The
-    // tray menu's Exit item is the only normal way to actually close
-    // it, tracked by the _reallyExiting flag above.
     protected override void OnFormClosing(FormClosingEventArgs e)
     {
         if (!_reallyExiting && _chkMinimizeTray.Checked)
