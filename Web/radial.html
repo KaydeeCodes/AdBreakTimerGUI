@@ -47,10 +47,6 @@
     const API = "/radial/api";
     let lastState = null;
 
-    // Diameter is a percentage of whichever viewport dimension is
-    // smaller, recalculated on every render. This is what makes the
-    // ring actually grow and shrink as the OBS Browser Source gets
-    // resized, instead of staying a fixed pixel size like it used to.
     function computeDiameter(sizePercent) {
         const vmin = Math.min(window.innerWidth, window.innerHeight);
         return Math.max(20, vmin * (sizePercent / 100));
@@ -90,25 +86,30 @@
 
         let drawnFraction;
         if (state.status === 'finished') {
-            // Fully drawn so the finish colour flash is actually visible.
             drawnFraction = 1;
         } else if (state.status === 'idle') {
             drawnFraction = 0;
         } else {
-            // Drains from a full circle down to nothing as time elapses.
             drawnFraction = 1 - elapsedPct;
         }
         ring.setAttribute('stroke-dashoffset', circumference * (1 - drawnFraction));
 
         // Rotate so the ring starts at 12 o'clock instead of 3 o'clock,
-        // and mirror it for anticlockwise. This is the standard
-        // "translate to center, rotate, translate back" trick for
-        // rotating an SVG shape around its own center. I'm not also
-        // setting transform-origin here since combining that with this
-        // manual translate math double applies the offset and throws
-        // the ring off screen, learned that one the hard way.
-        const mirror = state.direction === 'ccw' ? 'scale(-1,1)' : '';
-        ring.setAttribute('transform', `translate(${center},${center}) rotate(-90) ${mirror} translate(${-center},${-center})`);
+        // plus whatever extra rotation the streamer's chosen (0/90/180/270,
+        // via rotationDegrees), and mirror for anticlockwise.
+        //
+        // I swapped which direction gets the mirror from an earlier
+        // version of this. SVG draws a circle's stroke sweep clockwise by
+        // default (its y-axis points down, so a growing angle reads as
+        // clockwise on screen), so leaving 'cw' unmirrored looked like the
+        // obviously correct choice, but testing showed cw and ccw actually
+        // came out backwards from what they said. Rather than chase the
+        // exact cause through the browser's path winding rules, mirroring
+        // 'cw' instead of 'ccw' is the direct fix, and it now matches what
+        // the labels actually say on screen.
+        const mirror = state.direction === 'cw' ? 'scale(-1,1)' : '';
+        const rotationOffset = Number(state.rotationDegrees) || 0;
+        ring.setAttribute('transform', `translate(${center},${center}) rotate(${-90 + rotationOffset}) ${mirror} translate(${-center},${-center})`);
 
         const color = state.status === 'finished' ? state.finishColor : state.color;
         ring.setAttribute('stroke', color);
@@ -120,9 +121,6 @@
         }
     }
 
-    // Re-render immediately on resize instead of waiting for the next
-    // poll, so it feels responsive while I'm dragging the source around
-    // in OBS rather than lagging up to 200ms behind.
     window.addEventListener('resize', () => {
         if (lastState) render(lastState);
     });
