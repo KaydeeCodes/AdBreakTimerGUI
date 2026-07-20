@@ -3,20 +3,8 @@ using AdBreakTimerGUI.Engine;
 
 namespace AdBreakTimerGUI.Gui;
 
-// The window that opens when I click "Bar / Radial settings..." on the
-// main window. This is for the overlay's visual appearance, direction,
-// size, thickness, that sort of thing, not for the day to day ad break
-// timing itself (that stays on the main window, since it's what I
-// actually touch often).
-//
-// Built the same way as MainForm, laid out in code rather than the
-// visual designer, so I can read the whole thing top to bottom without
-// hunting through a hidden .designer.cs file.
 public class OverlaySettingsForm : Form
 {
-    // Loaded once when the window opens, only written back to disk if
-    // Save is clicked. Closing with the X or clicking Cancel leaves
-    // the files untouched, since nothing writes until SaveAndClose runs.
     private readonly BarState _barState;
     private readonly RadialState _radialState;
 
@@ -28,12 +16,8 @@ public class OverlaySettingsForm : Form
     private NumericUpDown _numRadialSize = null!;
     private NumericUpDown _numRadialThickness = null!;
     private TextBox _txtRadialTrackColor = null!;
+    private ComboBox _cmbRadialRotation = null!;
 
-    // The x position where every control column starts, and how wide
-    // each control is. Pulled out as constants rather than repeated
-    // magic numbers, since I widened this once already after the
-    // longer labels (like "Thickness (% of diameter)") were getting
-    // squeezed against the control next to them.
     private const int LabelX = 16;
     private const int ControlX = 230;
     private const int ControlWidth = 180;
@@ -49,7 +33,9 @@ public class OverlaySettingsForm : Form
     private void BuildUi()
     {
         Text = "Overlay settings";
-        ClientSize = new Size(440, 300);
+        // A little taller than before, to fit the new Rotation row on
+        // the Radial tab without cramming it in.
+        ClientSize = new Size(440, 340);
         FormBorderStyle = FormBorderStyle.FixedDialog;
         MaximizeBox = false;
         MinimizeBox = false;
@@ -59,7 +45,7 @@ public class OverlaySettingsForm : Form
         var tabs = new TabControl
         {
             Location = new Point(12, 12),
-            Size = new Size(416, 220)
+            Size = new Size(416, 260)
         };
 
         var barTab = new TabPage("Bar");
@@ -72,10 +58,9 @@ public class OverlaySettingsForm : Form
 
         Controls.Add(tabs);
 
-        // ---- Save / Cancel ----
         var btnSave = new Button
         {
-            Location = new Point(12, 242),
+            Location = new Point(12, 282),
             Size = new Size(200, 32),
             Text = "Save"
         };
@@ -83,7 +68,7 @@ public class OverlaySettingsForm : Form
 
         var btnCancel = new Button
         {
-            Location = new Point(228, 242),
+            Location = new Point(228, 282),
             Size = new Size(200, 32),
             Text = "Cancel"
         };
@@ -92,16 +77,10 @@ public class OverlaySettingsForm : Form
         Controls.Add(btnSave);
         Controls.Add(btnCancel);
 
-        // Lets Enter and Escape trigger these without me having to
-        // click directly on them.
         AcceptButton = btnSave;
         CancelButton = btnCancel;
     }
 
-    // A small helper so every label on both tabs gets a fixed width
-    // rather than AutoSize, which is what was letting the longer ones
-    // (like "Thickness (% of diameter)") run into the control next to
-    // them instead of wrapping or getting cut off cleanly.
     private static Label NewFieldLabel(string text, int y) => new()
     {
         Location = new Point(LabelX, y),
@@ -143,11 +122,6 @@ public class OverlaySettingsForm : Form
         };
         tab.Controls.Add(_txtBarWidth);
 
-        // A note for future me on why this one's text rather than a
-        // number. BarWidth is a raw CSS value (e.g. "100%" or "800px"),
-        // not a plain pixel count like BarHeight, since I wanted the
-        // option of a bar that doesn't stretch the full width of the
-        // Browser Source.
         var hint = new Label
         {
             Location = new Point(LabelX, 118),
@@ -203,14 +177,30 @@ public class OverlaySettingsForm : Form
             Text = _radialState.TrackColor
         };
         tab.Controls.Add(_txtRadialTrackColor);
+
+        // Only four options rather than a free number, these are the
+        // only angles that make sense as a quarter-turn preset, and
+        // matching that to a dropdown means there's no way to end up
+        // with an odd angle nothing else in the app expects. 360 isn't
+        // offered separately from 0, they look identical on screen, so
+        // storing both would just be two ways of saying the same thing.
+        tab.Controls.Add(NewFieldLabel("Rotation", 163));
+        _cmbRadialRotation = new ComboBox
+        {
+            Location = new Point(ControlX, 160),
+            Size = new Size(ControlWidth, 23),
+            DropDownStyle = ComboBoxStyle.DropDownList
+        };
+        _cmbRadialRotation.Items.Add("0°");
+        _cmbRadialRotation.Items.Add("90°");
+        _cmbRadialRotation.Items.Add("180°");
+        _cmbRadialRotation.Items.Add("270°");
+        _cmbRadialRotation.SelectedIndex = (_radialState.RotationDegrees / 90) % 4;
+        tab.Controls.Add(_cmbRadialRotation);
     }
 
     private void SaveAndClose()
     {
-        // Track colour is the only free text field here that actually
-        // needs validating, everything else is either a dropdown or a
-        // number already constrained by its NumericUpDown's Minimum
-        // and Maximum.
         string? parsedTrackColor = ColorParsing.ParseColor(_txtRadialTrackColor.Text);
         if (parsedTrackColor == null)
         {
@@ -228,6 +218,7 @@ public class OverlaySettingsForm : Form
         _radialState.Size = (int)_numRadialSize.Value;
         _radialState.Thickness = (int)_numRadialThickness.Value;
         _radialState.TrackColor = parsedTrackColor;
+        _radialState.RotationDegrees = _cmbRadialRotation.SelectedIndex * 90;
 
         JsonStore.Save(_barState, Paths.BarFile);
         JsonStore.Save(_radialState, Paths.RadialFile);

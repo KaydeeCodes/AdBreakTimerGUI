@@ -12,13 +12,6 @@ public static class TimerEngine
     // ------------------------------------------------------------
     // Tick
     // ------------------------------------------------------------
-    // I don't run a background timer loop anywhere. Instead every
-    // state object stores LastTick (when I last did this calculation)
-    // and I work out how much time has actually passed based on the
-    // wall clock whenever something asks. That means the countdown
-    // stays accurate even if the overlay page isn't polling for a
-    // while, or the app itself gets minimised or the machine sleeps,
-    // since I'm never relying on a timer callback firing on schedule.
     public static void Tick(OverlayState s)
     {
         if (s.Status == "running" && s.LastTick is not null)
@@ -36,28 +29,11 @@ public static class TimerEngine
             }
             else
             {
-                // I'm deliberately advancing LastTick by exactly the
-                // whole seconds I just counted, rather than resetting
-                // it to "now". Math.Floor above always throws away a
-                // fraction of a second on every check, and resetting
-                // to "now" instead of "the last whole second I counted"
-                // means that fraction is lost for good, every single
-                // cycle. Over a long countdown, polled several times a
-                // second, that adds up to real drift. This was a bug
-                // in the console version and I'm not reintroducing it
-                // here.
                 s.LastTick = s.LastTick.Value.AddSeconds(elapsedSeconds);
             }
             return;
         }
 
-        // Once something's finished, I want it to flash for
-        // FlashDuration seconds and then quietly go back to idle by
-        // itself, so the overlay never gets stuck lit up forever if
-        // the next command is late arriving. This runs on every check
-        // (including plain status polls), so the switch back to idle
-        // happens on schedule regardless of whether a new command
-        // ever turns up.
         if (s.Status == "finished" && s.FinishedAt is not null)
         {
             double secondsSinceFinish = (DateTime.UtcNow - s.FinishedAt.Value).TotalSeconds;
@@ -72,10 +48,6 @@ public static class TimerEngine
     // ------------------------------------------------------------
     // Commands shared by both overlays
     // ------------------------------------------------------------
-    // Returns true if I handled this command here (whether it worked
-    // or produced an error), false if it's not one I know about, in
-    // which case the caller checks its own overlay specific commands
-    // next (setbarheight, setsize, and so on).
     public static bool HandleCommon(string cmd, NameValueCollection qs, OverlayState s, out string? error)
     {
         error = null;
@@ -83,21 +55,10 @@ public static class TimerEngine
 
         switch (cmd)
         {
-            // This is the one command I actually use day to day. One
-            // request sets whatever's given and starts the countdown
-            // straight away, instead of chaining several calls
-            // together from Streamer.bot.
             case "go":
                 {
                     string timeValue = Get("t");
                     if (string.IsNullOrEmpty(timeValue)) { error = "go requires t= (e.g. t=01:00:00)."; return true; }
-
-                    // Going through TryParseDuration rather than calling
-                    // HmsToSecs directly, so a malformed t= from
-                    // whatever's calling this (a typo in a Streamer.bot
-                    // action, for instance) comes back as a clean error
-                    // in the response instead of throwing all the way
-                    // up to a generic 500.
                     if (!TimeParsing.TryParseDuration(timeValue, out int seconds, out error)) return true;
 
                     if (!string.IsNullOrEmpty(Get("color")))
@@ -167,10 +128,6 @@ public static class TimerEngine
                     if (!int.TryParse(Get("s"), out int secondsToAdd)) { error = "Missing s= value."; return true; }
                     s.Remaining += Math.Abs(secondsToAdd);
                     if (s.InitialTime <= 0) s.InitialTime = s.Remaining;
-                    // If it had already finished and I'm topping up time,
-                    // I bring it back to paused rather than leaving it
-                    // stuck showing the finished flash with time left on
-                    // the clock again.
                     if (s.Status == "finished" && s.Remaining > 0)
                     {
                         s.Status = "paused";
@@ -231,13 +188,9 @@ public static class TimerEngine
 
             case "status":
             case "":
-                // Nothing to do, this is just the 5x a second poll from
-                // the overlay page asking for the current state back.
                 return true;
 
             default:
-                // Not one of mine, let the caller check its own bar or
-                // radial specific commands next.
                 return false;
         }
     }
@@ -324,6 +277,24 @@ public static class TimerEngine
                     string? color = ColorParsing.ParseColor(Get("v"));
                     if (color == null) { error = "Invalid colour."; return true; }
                     s.TrackColor = color;
+                    return true;
+                }
+            case "setrotation":
+                {
+                    // Only accepting multiples of 90, that's what the
+                    // settings window's dropdown offers, no reason to
+                    // silently accept an odd angle like 45 that nothing
+                    // in the GUI would ever actually let someone pick.
+                    if (!int.TryParse(Get("v"), out int rotation) || rotation % 90 != 0)
+                    {
+                        error = "Rotation must be 0, 90, 180, or 270.";
+                        return true;
+                    }
+                    // Folding anything outside 0-359 back into range,
+                    // and 360 down to 0, they're visually identical, no
+                    // reason to store two values that mean the same
+                    // thing.
+                    s.RotationDegrees = ((rotation % 360) + 360) % 360;
                     return true;
                 }
             default:
