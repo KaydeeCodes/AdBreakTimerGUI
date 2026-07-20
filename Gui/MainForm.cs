@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Net.Http;
 using AdBreakTimerGUI.Config;
 using AdBreakTimerGUI.Engine;
 using AdBreakTimerGUI.Gui;
@@ -12,6 +13,14 @@ public partial class MainForm : Form
     // here and keep it for the form's whole lifetime, starting and
     // stopping it as I like rather than recreating it every time.
     private readonly WebServerHost _server = new();
+
+    // Used by the Test buttons to fire a real HTTP request at my own
+    // server, exactly the same way Streamer.bot would. One shared
+    // instance rather than creating a new HttpClient per click, that's
+    // the recommended pattern, a fresh HttpClient per call can exhaust
+    // sockets under repeated use even though this app will only ever
+    // fire a handful of these.
+    private static readonly HttpClient TestHttpClient = new();
 
     // Loaded once on startup, saved back whenever something changes it,
     // the port after a successful start, the ad timing when I click
@@ -44,6 +53,7 @@ public partial class MainForm : Form
     private TextBox _txtApiExample = null!;
     private TextBox _txtAdBreak = null!;
     private TextBox _txtAdFree = null!;
+    private NumericUpDown _numAdBuffer = null!;
     private Button _btnSaveSettings = null!;
 
     private NotifyIcon _trayIcon = null!;
@@ -209,16 +219,24 @@ public partial class MainForm : Form
         Controls.Add(NewSectionLabel("OVERLAY && API LINKS", y));
         y += 22;
 
-        _txtBarUrl = NewLinkRow("Bar overlay", y, out Button copyBar);
+        _txtBarUrl = NewLinkRow("Bar overlay", y, true, out Button copyBar, out Button? testBar);
         y += 46;
-        _txtRadialUrl = NewLinkRow("Radial overlay", y, out Button copyRadial);
+        _txtRadialUrl = NewLinkRow("Radial overlay", y, true, out Button copyRadial, out Button? testRadial);
         y += 46;
-        _txtApiExample = NewLinkRow("Example go command", y, out Button copyApi);
+        _txtApiExample = NewLinkRow("Example go command", y, false, out Button copyApi, out _);
         y += 46;
 
         copyBar.Click += (_, _) => CopyToClipboard(_txtBarUrl.Text);
         copyRadial.Click += (_, _) => CopyToClipboard(_txtRadialUrl.Text);
         copyApi.Click += (_, _) => CopyToClipboard(_txtApiExample.Text);
+
+        // The whole reason these exist: positioning a Browser Source
+        // in OBS with nothing actually visible in it is genuinely
+        // awkward. This fires a plain 1 hour countdown so there's
+        // something on screen long enough to drag and resize, without
+        // needing Streamer.bot or a browser tab open just to test.
+        testBar!.Click += (_, _) => FireTestCountdown("bar");
+        testRadial!.Click += (_, _) => FireTestCountdown("radial");
 
         Controls.Add(NewSeparator(y));
         y += 16;
@@ -247,6 +265,24 @@ public partial class MainForm : Form
             Text = TimeParsing.SecsToHms(_settings.AdFreeSeconds)
         };
         Controls.Add(_txtAdFree);
+        y += 32;
+
+        // A plain number of seconds rather than mm:ss, this is meant
+        // to be a short gap (a handful of seconds), not a proper
+        // duration, so a spinner felt like the more honest control for
+        // what it actually is. Not used by anything yet, see the
+        // comment on AppSettings.AdBufferSeconds for why it's here
+        // ahead of the code that'll actually read it.
+        Controls.Add(new Label { Location = new Point(16, y + 3), Size = new Size(290, 20), Text = "Gap before ad free countdown (seconds)" });
+        _numAdBuffer = new NumericUpDown
+        {
+            Location = new Point(320, y),
+            Size = new Size(100, 23),
+            Minimum = 0,
+            Maximum = 300,
+            Value = Math.Clamp(_settings.AdBufferSeconds, 0, 300)
+        };
+        Controls.Add(_numAdBuffer);
         y += 36;
 
         _btnSaveSettings = new Button
@@ -388,31 +424,50 @@ public partial class MainForm : Form
     };
 
     // One row in the overlay & API links section: a caption, a read
-    // only text box holding the URL, and a Copy button next to it. I
-    // hand the text box back as the return value so I can update its
-    // text later once the port's actually known, and the copy button
-    // back through an out parameter so the caller can wire up whatever
-    // that particular row should copy.
-    private TextBox NewLinkRow(string caption, int y, out Button copyButton)
+    // only text box holding the URL, a Copy button, and optionally a
+    // Test button. showTestButton controls both whether the Test
+    // button exists at all and how much room the text box gets, since
+    // the example command row doesn't need one (there's nothing useful
+    // for it to test that Copy doesn't already cover) and gets the
+    // extra width back instead.
+    private TextBox NewLinkRow(string caption, int y, bool showTestButton, out Button copyButton, out Button? testButton)
     {
         Controls.Add(new Label { Location = new Point(16, y), AutoSize = true, ForeColor = Color.Gray, Text = caption });
+
+        int textBoxWidth = showTestButton ? 248 : 330;
 
         var textBox = new TextBox
         {
             Location = new Point(16, y + 16),
-            Size = new Size(330, 23),
+            Size = new Size(textBoxWidth, 23),
             ReadOnly = true,
             Text = "not started yet"
         };
         Controls.Add(textBox);
 
+        int copyX = 16 + textBoxWidth + 6;
         copyButton = new Button
         {
-            Location = new Point(352, y + 15),
-            Size = new Size(68, 25),
+            Location = new Point(copyX, y + 15),
+            Size = new Size(showTestButton ? 60 : 68, 25),
             Text = "Copy"
         };
         Controls.Add(copyButton);
+
+        if (showTestButton)
+        {
+            testButton = new Button
+            {
+                Location = new Point(copyX + 66, y + 15),
+                Size = new Size(66, 25),
+                Text = "Test"
+            };
+            Controls.Add(testButton);
+        }
+        else
+        {
+            testButton = null;
+        }
 
         return textBox;
     }
@@ -421,6 +476,35 @@ public partial class MainForm : Form
     {
         if (string.IsNullOrWhiteSpace(text) || text == "not started yet") return;
         Clipboard.SetText(text);
+    }
+
+    // Fires a plain 1 hour go command at whichever overlay was clicked,
+    // "bar" or "radial", using the real HTTP API, exactly the way
+    // Streamer.bot would. Deliberately not passing colour or direction
+    // here, so it shows up using whatever's already configured in Bar
+    // / Radial settings, this is purely to give me something on screen
+    // long enough to drag and resize the Browser Source in OBS, not to
+    // demonstrate the ad break behaviour itself.
+    private async void FireTestCountdown(string overlay)
+    {
+        if (!_server.IsRunning)
+        {
+            MessageBox.Show(this, "Start the service first, then Test will actually have something to show in OBS.",
+                "Ad Break Timer", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            return;
+        }
+
+        string url = $"http://localhost:{_server.Port}/{overlay}/api?cmd=go&t=00:30:00&color=%2300ff00";
+        try
+        {
+            await TestHttpClient.GetAsync(url);
+        }
+        catch (Exception ex)
+        {
+            Logger.Log("[ERROR]", $"Test countdown failed: {ex.Message}");
+            MessageBox.Show(this, $"Couldn't start the test countdown: {ex.Message}", "Ad Break Timer",
+                MessageBoxButtons.OK, MessageBoxIcon.Error);
+        }
     }
 
     // ------------------------------------------------------------
@@ -561,6 +645,11 @@ public partial class MainForm : Form
 
         _settings.AdBreakSeconds = adBreakSeconds;
         _settings.AdFreeSeconds = adFreeSeconds;
+        // No validation needed here, NumericUpDown already constrains
+        // this to 0-300 on its own, unlike the two text boxes above
+        // which accept free text and need TryParseDuration to catch
+        // rubbish input.
+        _settings.AdBufferSeconds = (int)_numAdBuffer.Value;
         JsonStore.Save(_settings, Paths.SettingsFile);
 
         RefreshLinkText();
