@@ -50,6 +50,9 @@
         <Compile Update="Gui\OverlaySettingsForm.cs">
             <SubType>Form</SubType>
         </Compile>
+        <Compile Update="Gui\TwitchConnectForm.cs">
+          <SubType>Form</SubType>
+        </Compile>
     </ItemGroup>
 
 </Project>
