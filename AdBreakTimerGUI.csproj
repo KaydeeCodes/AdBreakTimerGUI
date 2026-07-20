@@ -6,9 +6,11 @@
         <Nullable>enable</Nullable>
         <UseWindowsForms>true</UseWindowsForms>
         <ImplicitUsings>enable</ImplicitUsings>
+        <ApplicationIcon>Assets\app.ico</ApplicationIcon>
     </PropertyGroup>
 
     <ItemGroup>
+      <Folder Include="Assets\" />
       <Folder Include="Web\" />
     </ItemGroup>
 

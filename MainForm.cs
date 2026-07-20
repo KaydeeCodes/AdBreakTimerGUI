@@ -80,6 +80,13 @@ public partial class MainForm : Form
         MaximizeBox = false;
         StartPosition = FormStartPosition.CenterScreen;
         Font = new Font("Segoe UI", 9F);
+        
+        // I'm extracting this from the exe's own icon resource rather
+        // than loading Assets/app.ico separately. ApplicationIcon in
+        // the csproj is what actually embeds it into the exe in the
+        // first place, this just reads it back out, so there's only
+        // ever one file to swap if I change the icon later.
+        Icon = Icon.ExtractAssociatedIcon(Application.ExecutablePath);
 
         int y = 16;
 
@@ -471,7 +478,7 @@ public partial class MainForm : Form
             // SystemIcons.Application is a stand in until I've got a
             // proper .ico for this. Swapping it later is a one line
             // change here, nothing else needs to know about it.
-            Icon = SystemIcons.Application,
+            Icon = Icon.ExtractAssociatedIcon(Application.ExecutablePath) ?? SystemIcons.Application,
             Text = "Ad Break Timer (stopped)",
             Visible = true,
             ContextMenuStrip = menu
