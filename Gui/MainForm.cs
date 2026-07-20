@@ -4,6 +4,7 @@ using AdBreakTimerGUI.Config;
 using AdBreakTimerGUI.Engine;
 using AdBreakTimerGUI.Gui;
 using AdBreakTimerGUI.Server;
+using AdBreakTimerGUI.Twitch;
 
 namespace AdBreakTimerGUI;
 
@@ -34,6 +35,15 @@ public partial class MainForm : Form
     private NumericUpDown _numAdBuffer = null!;
     private Button _btnSaveSettings = null!;
 
+    // Twitch tab controls, promoted to fields now that connecting
+    // actually needs to update them after the fact rather than just
+    // setting them once at startup.
+    private Label _lblTwitchStatus = null!;
+    private Button _btnTwitchConnect = null!;
+    private Button _btnTwitchDisconnect = null!;
+    private CheckBox _chkAutoDetectAds = null!;
+    private TwitchTokenData? _twitchToken;
+
     private NotifyIcon _trayIcon = null!;
     private bool _reallyExiting;
 
@@ -56,17 +66,16 @@ public partial class MainForm : Form
 
         if (_settings.StartAutomatically)
             StartServer();
+
+        // Fire and forget is fine here, this only ever updates the
+        // Twitch tab once it resolves, nothing else in startup depends
+        // on it finishing first.
+        _ = LoadTwitchStateAsync();
     }
 
     // ------------------------------------------------------------
     // Building the window
     // ------------------------------------------------------------
-    // Reworked into a fixed header (status, quick toggles) plus a
-    // TabControl for everything else, rather than one long stack of
-    // sections. The old layout kept growing every time I added
-    // something, this version has room for the Twitch tab to grow on
-    // its own without pushing the Links or Timing tabs further down
-    // the screen. Still built entirely in code, no visual designer.
     private void BuildUi()
     {
         Text = "Ad Break Timer";
@@ -78,7 +87,6 @@ public partial class MainForm : Form
 
         int y = 16;
 
-        // ---- Status row: LED, status text, port, start/stop button ----
         _ledPanel = new Panel { Location = new Point(16, y), Size = new Size(16, 16) };
         _ledPanel.Paint += (_, e) =>
         {
@@ -98,10 +106,9 @@ public partial class MainForm : Form
         Controls.Add(_btnToggle);
 
         y += 50;
-        Controls.Add(NewSeparator(this, y));
+        Controls.Add(NewSeparator(y));
         y += 16;
 
-        // ---- Quick toggles, side by side to keep this to one row ----
         _chkAutoStart = new CheckBox { Location = new Point(16, y), AutoSize = true, Text = "Start on launch", Checked = _settings.StartAutomatically };
         _chkAutoStart.CheckedChanged += (_, _) =>
         {
@@ -123,10 +130,9 @@ public partial class MainForm : Form
         Controls.Add(_chkMinimizeTray);
 
         y += 26;
-        Controls.Add(NewSeparator(this, y));
+        Controls.Add(NewSeparator(y));
         y += 16;
 
-        // ---- Tab control: Links / Timing / Appearance / Twitch ----
         var tabs = new TabControl { Location = new Point(16, y), Size = new Size(404, 236) };
 
         var linksTab = new TabPage("Links");
@@ -146,7 +152,6 @@ public partial class MainForm : Form
         Controls.Add(tabs);
         y += tabs.Height + 16;
 
-        // ---- Footer: open config folder / open log file ----
         Button btnOpenConfig = new() { Location = new Point(16, y), Size = new Size(195, 30), Text = "Open config folder" };
         btnOpenConfig.Click += (_, _) => Process.Start("explorer.exe", Paths.ConfigDir);
 
@@ -161,7 +166,6 @@ public partial class MainForm : Form
         Controls.Add(btnOpenLog);
         y += 40;
 
-        // ---- Footer credit ----
         var lblFooter = new LinkLabel
         {
             Location = new Point(16, y),
@@ -205,7 +209,7 @@ public partial class MainForm : Form
             Size = new Size(360, 40),
             ForeColor = Color.Gray,
             Font = new Font("Segoe UI", 7.5F),
-            Text = "Test starts a plain 30 min countdown, just enough to position the Browser Source in OBS."
+            Text = "Test starts a plain 1 hour countdown, just enough to position the Browser Source in OBS without needing Streamer.bot running yet."
         };
         tab.Controls.Add(hint);
     }
@@ -271,23 +275,36 @@ public partial class MainForm : Form
 
     private void BuildTwitchTab(TabPage tab)
     {
-        tab.Controls.Add(new Label { Location = new Point(12, 15), AutoSize = true, Text = "Not connected", ForeColor = Color.Gray });
-        Button btnTwitchConnect = new() { Location = new Point(280, 12), Size = new Size(100, 26), Text = "Connect", Enabled = false };
-        var tip = new ToolTip();
-        tip.SetToolTip(btnTwitchConnect, "Coming in a future update");
-        tab.Controls.Add(btnTwitchConnect);
+        _lblTwitchStatus = new Label { Location = new Point(12, 15), AutoSize = true, Text = "Not connected", ForeColor = Color.Gray };
+        tab.Controls.Add(_lblTwitchStatus);
 
-        CheckBox chkAutoDetectAds = new()
+        _btnTwitchConnect = new Button { Location = new Point(280, 12), Size = new Size(100, 26), Text = "Connect" };
+        _btnTwitchConnect.Click += (_, _) => OnTwitchConnectClicked();
+        tab.Controls.Add(_btnTwitchConnect);
+
+        // Same spot as Connect, only one of the two is ever visible at
+        // once, toggled by UpdateTwitchTabUi.
+        _btnTwitchDisconnect = new Button { Location = new Point(280, 12), Size = new Size(100, 26), Text = "Disconnect", Visible = false };
+        _btnTwitchDisconnect.Click += (_, _) => OnTwitchDisconnectClicked();
+        tab.Controls.Add(_btnTwitchDisconnect);
+
+        _chkAutoDetectAds = new CheckBox
         {
             Location = new Point(12, 50),
             AutoSize = true,
             Text = "Auto detect ads and run the overlay automatically",
             Checked = _settings.AutoDetectAds,
+            // Starts disabled, there's genuinely nothing for it to do
+            // without a connected account. UpdateTwitchTabUi flips this
+            // on once there's a real connection.
             Enabled = false
         };
-        var tipAuto = new ToolTip();
-        tipAuto.SetToolTip(chkAutoDetectAds, "Needs a connected Twitch account, coming in a future update");
-        tab.Controls.Add(chkAutoDetectAds);
+        _chkAutoDetectAds.CheckedChanged += (_, _) =>
+        {
+            _settings.AutoDetectAds = _chkAutoDetectAds.Checked;
+            JsonStore.Save(_settings, Paths.SettingsFile);
+        };
+        tab.Controls.Add(_chkAutoDetectAds);
 
         var hint = new Label
         {
@@ -301,22 +318,115 @@ public partial class MainForm : Form
     }
 
     // ------------------------------------------------------------
+    // Twitch connect / disconnect
+    // ------------------------------------------------------------
+    // Runs once at startup. If there's a saved token from a previous
+    // session, this refreshes it if it's close to expiring and updates
+    // the tab to reflect it, rather than starting every launch back at
+    // "Not connected" even though I connected days ago.
+    private async Task LoadTwitchStateAsync()
+    {
+        TwitchTokenData? token = TwitchTokenStore.Load();
+        if (token is null)
+        {
+            UpdateTwitchTabUi(null);
+            return;
+        }
+
+        if (token.IsExpiredOrExpiringSoon)
+        {
+            TwitchTokenData? refreshed = await TwitchAuthService.RefreshAsync(token, CancellationToken.None);
+            if (refreshed is null)
+            {
+                // The refresh token's no good any more either, most
+                // likely it was revoked from Twitch's side (I clicked
+                // disconnect on Twitch's own site, or it just expired
+                // from long disuse). Nothing to do but forget it and
+                // ask to reconnect, rather than getting stuck retrying
+                // a token that's never going to work again.
+                TwitchTokenStore.Delete();
+                UpdateTwitchTabUi(null);
+                return;
+            }
+            token = refreshed;
+        }
+
+        _twitchToken = token;
+        UpdateTwitchTabUi(token);
+    }
+
+    private void OnTwitchConnectClicked()
+    {
+        using var dlg = new TwitchConnectForm();
+        DialogResult result = dlg.ShowDialog(this);
+
+        if (result == DialogResult.OK && dlg.Result != null)
+        {
+            _twitchToken = dlg.Result;
+            UpdateTwitchTabUi(_twitchToken);
+
+            // Turns on by itself the moment an account connects, as
+            // planned, still just a checkbox afterwards so it can be
+            // switched back off for manual control any time.
+            _settings.AutoDetectAds = true;
+            _chkAutoDetectAds.Checked = true;
+            JsonStore.Save(_settings, Paths.SettingsFile);
+
+            Logger.Log("[TWITCH]", $"Connected as {_twitchToken.DisplayName}");
+        }
+    }
+
+    private void OnTwitchDisconnectClicked()
+    {
+        DialogResult confirm = MessageBox.Show(this,
+            "Disconnect this Twitch account? Auto detect ads will stop working until reconnected.",
+            "Ad Break Timer", MessageBoxButtons.YesNo, MessageBoxIcon.Question);
+        if (confirm != DialogResult.Yes) return;
+
+        TwitchTokenStore.Delete();
+        _twitchToken = null;
+        _settings.AutoDetectAds = false;
+        JsonStore.Save(_settings, Paths.SettingsFile);
+        UpdateTwitchTabUi(null);
+
+        Logger.Log("[TWITCH]", "Disconnected.");
+    }
+
+    // The one place that decides what the Twitch tab actually shows,
+    // same pattern as RefreshStatusDisplay for the status hero, called
+    // from three places: startup, right after a successful connect,
+    // and right after a disconnect.
+    private void UpdateTwitchTabUi(TwitchTokenData? token)
+    {
+        if (token is null)
+        {
+            _lblTwitchStatus.Text = "Not connected";
+            _lblTwitchStatus.ForeColor = Color.Gray;
+            _btnTwitchConnect.Visible = true;
+            _btnTwitchDisconnect.Visible = false;
+            _chkAutoDetectAds.Enabled = false;
+            _chkAutoDetectAds.Checked = false;
+        }
+        else
+        {
+            _lblTwitchStatus.Text = $"Connected as {token.DisplayName}";
+            _lblTwitchStatus.ForeColor = SystemColors.ControlText;
+            _btnTwitchConnect.Visible = false;
+            _btnTwitchDisconnect.Visible = true;
+            _chkAutoDetectAds.Enabled = true;
+        }
+    }
+
+    // ------------------------------------------------------------
     // Shared small helpers
     // ------------------------------------------------------------
-    private static Control NewSeparator(Control parent, int y) => new Panel
+    private static Control NewSeparator(int y) => new Panel
     {
         Location = new Point(16, y),
         Size = new Size(404, 1),
         BackColor = Color.Gainsboro
     };
 
-    // One row inside a tab: a caption, a read only text box holding
-    // the URL, a Copy button, and optionally a Test button. Same idea
-    // as before, just now taking a parent so it can add itself to a
-    // TabPage instead of always assuming it's going straight onto the
-    // form, and using slightly tighter margins since a TabPage has
-    // less usable width than the form itself once its own border is
-    // accounted for.
     private TextBox NewLinkRow(Control parent, string caption, int y, bool showTestButton, out Button copyButton, out Button? testButton)
     {
         parent.Controls.Add(new Label { Location = new Point(12, y), AutoSize = true, ForeColor = Color.Gray, Text = caption });
@@ -369,7 +479,7 @@ public partial class MainForm : Form
             return;
         }
 
-        string url = $"http://localhost:{_server.Port}/{overlay}/api?cmd=go&t=00:30:00";
+        string url = $"http://localhost:{_server.Port}/{overlay}/api?cmd=go&t=01:00:00";
         try
         {
             await TestHttpClient.GetAsync(url);
