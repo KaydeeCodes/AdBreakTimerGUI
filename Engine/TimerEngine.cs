@@ -91,8 +91,14 @@ public static class TimerEngine
                 {
                     string timeValue = Get("t");
                     if (string.IsNullOrEmpty(timeValue)) { error = "go requires t= (e.g. t=01:00:00)."; return true; }
-                    int seconds = TimeParsing.HmsToSecs(timeValue);
-                    if (seconds <= 0) { error = "Time must be greater than zero."; return true; }
+
+                    // Going through TryParseDuration rather than calling
+                    // HmsToSecs directly, so a malformed t= from
+                    // whatever's calling this (a typo in a Streamer.bot
+                    // action, for instance) comes back as a clean error
+                    // in the response instead of throwing all the way
+                    // up to a generic 500.
+                    if (!TimeParsing.TryParseDuration(timeValue, out int seconds, out error)) return true;
 
                     if (!string.IsNullOrEmpty(Get("color")))
                     {
@@ -147,8 +153,7 @@ public static class TimerEngine
                 {
                     string timeValue = Get("t");
                     if (string.IsNullOrEmpty(timeValue)) { error = "Missing t= value (e.g. t=01:30:00)."; return true; }
-                    int seconds = TimeParsing.HmsToSecs(timeValue);
-                    if (seconds <= 0) { error = "Time must be greater than zero."; return true; }
+                    if (!TimeParsing.TryParseDuration(timeValue, out int seconds, out error)) return true;
                     s.Remaining = seconds;
                     s.InitialTime = seconds;
                     s.Status = "idle";

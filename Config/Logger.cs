@@ -7,6 +7,25 @@
 // just opens whatever this writes to.
 public static class Logger
 {
+    // Raised whenever something logs an [ERROR] line. MainForm listens
+    // to this so the traffic light can go amber the moment something
+    // actually goes wrong, rather than needing separate error tracking
+    // wired up in every place that could fail. This can fire from a
+    // background thread (a request handler, the server's listen loop),
+    // so anything subscribing needs to marshal back onto the UI thread
+    // before touching a control, same as WebServerHost.StatusChanged.
+    public static event Action? ErrorLogged;
+
+    // The overlay pages poll five times a second each, and commands can
+    // arrive from more than one source close together (a browser tab
+    // I'm testing with, Streamer.bot, and so on), so more than one
+    // request can genuinely be in flight at the same time. Writing to
+    // the same file from two threads at once isn't safe without
+    // something like this, found during a full review rather than it
+    // actually breaking on me, but it's a real risk under load, so
+    // every write goes through this lock.
+    private static readonly object WriteLock = new();
+
     // I overwrite the log fresh on every launch rather than appending
     // forever. If someone hits a problem I only ever need the latest
     // run, and a log that grows without limit is just clutter.
@@ -15,8 +34,11 @@ public static class Logger
         Paths.EnsureConfigDirExists();
         try
         {
-            File.WriteAllText(Paths.LogFile,
-                $"Ad Break Timer log, started {DateTime.Now:yyyy-MM-dd HH:mm:ss}{Environment.NewLine}{new string('=', 60)}{Environment.NewLine}");
+            lock (WriteLock)
+            {
+                File.WriteAllText(Paths.LogFile,
+                    $"Ad Break Timer log, started {DateTime.Now:yyyy-MM-dd HH:mm:ss}{Environment.NewLine}{new string('=', 60)}{Environment.NewLine}");
+            }
         }
         catch
         {
@@ -32,12 +54,23 @@ public static class Logger
     {
         try
         {
-            File.AppendAllText(Paths.LogFile, $"{DateTime.Now:HH:mm:ss} {tag} {message}{Environment.NewLine}");
+            lock (WriteLock)
+            {
+                File.AppendAllText(Paths.LogFile, $"{DateTime.Now:HH:mm:ss} {tag} {message}{Environment.NewLine}");
+            }
         }
         catch
         {
             // Same reasoning as above, a failed log write shouldn't
             // take the app down with it.
         }
+
+        // Firing this outside the try/catch above and outside the lock,
+        // on purpose. I want the GUI to hear about an error even if the
+        // log file itself couldn't be written to, and I don't want an
+        // exception thrown by whatever's listening to this event to
+        // ever be blamed on the logger itself.
+        if (tag == "[ERROR]")
+            ErrorLogged?.Invoke();
     }
 }

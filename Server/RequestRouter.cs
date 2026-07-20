@@ -14,6 +14,20 @@ namespace AdBreakTimerGUI.Server;
 // than needing its own copy of the command logic.
 public static class RequestRouter
 {
+    // One lock per overlay, not a single shared lock for both. Bar and
+    // radial commands never touch each other's files, so there's no
+    // reason to make a bar command wait behind a radial one, they're
+    // genuinely independent. Found the need for these during a full
+    // review, not from it actually breaking, WebServerHost fires
+    // requests off without waiting for the previous one to finish (on
+    // purpose, so a slow request can't block the 5x/sec polling behind
+    // it), which means two requests for the same overlay really can
+    // run at the same moment. Without a lock, that's a genuine race on
+    // the load, tick, mutate, save sequence below, whichever one saves
+    // last silently wins and the other's change is just lost.
+    private static readonly object BarLock = new();
+    private static readonly object RadialLock = new();
+
     public static async Task HandleRequest(HttpListenerContext ctx)
     {
         HttpListenerRequest req = ctx.Request;
@@ -80,20 +94,40 @@ public static class RequestRouter
     // ------------------------------------------------------------
     private static string HandleBarCommand(string cmd, System.Collections.Specialized.NameValueCollection qs)
     {
-        BarState state = JsonStore.Load<BarState>(Paths.BarFile) ?? new BarState();
+        // Everything from load through save happens inside the lock,
+        // not just the save. Locking only the save wouldn't help, two
+        // threads could still both load the same "before" state, both
+        // mutate their own copy, and whichever saves second still wins.
+        // The whole read-modify-write sequence needs to be one atomic
+        // unit.
+        lock (BarLock)
+        {
+            BarState state = JsonStore.Load<BarState>(Paths.BarFile) ?? new BarState();
 
-        TimerEngine.Tick(state);
+            TimerEngine.Tick(state);
 
-        bool handled = TimerEngine.HandleCommon(cmd, qs, state, out string? error);
-        if (!handled)
-            TimerEngine.HandleBarSpecific(cmd, qs, state, out error);
+            bool handled = TimerEngine.HandleCommon(cmd, qs, state, out string? error);
+            if (!handled)
+                TimerEngine.HandleBarSpecific(cmd, qs, state, out error);
 
-        JsonStore.Save(state, Paths.BarFile);
+            JsonStore.Save(state, Paths.BarFile);
 
-        if (cmd is not ("status" or ""))
-            Logger.Log("[BAR]", error != null ? $"FAILED {cmd}: {error}" : cmd);
+            if (cmd is not ("status" or ""))
+                Logger.Log("[BAR]", error != null ? $"FAILED {cmd}: {error}" : cmd);
 
-        return BuildResponseJson(cmd, state, error);
+            // I'm serialising directly here rather than through a shared
+            // helper. state is a genuine BarState at this exact point,
+            // and the JSON serialiser decides what fields to include
+            // based on the declared type of the variable it's handed,
+            // not what the object actually is underneath. A shared
+            // helper typed as the base OverlayState silently dropped
+            // barHeight/barWidth from the response, which is exactly
+            // what made the bar collapse to zero height on the overlay
+            // page. Learned that one the hard way.
+            if (error != null)
+                return System.Text.Json.JsonSerializer.Serialize(new { ok = false, error });
+            return System.Text.Json.JsonSerializer.Serialize(new { ok = true, cmd, state });
+        }
     }
 
     // ------------------------------------------------------------
@@ -101,34 +135,33 @@ public static class RequestRouter
     // ------------------------------------------------------------
     private static string HandleRadialCommand(string cmd, System.Collections.Specialized.NameValueCollection qs)
     {
-        RadialState state = JsonStore.Load<RadialState>(Paths.RadialFile) ?? new RadialState();
+        lock (RadialLock)
+        {
+            RadialState state = JsonStore.Load<RadialState>(Paths.RadialFile) ?? new RadialState();
 
-        // Clamping these here as a safety net, in case an old or hand
-        // edited config file has a value outside the range the overlay
-        // page actually expects. I'd rather quietly pull it back into
-        // range than have the ring render at some broken size.
-        state.Size = Math.Clamp(state.Size, 5, 100);
-        state.Thickness = Math.Clamp(state.Thickness, 1, 50);
+            // Clamping these here as a safety net, in case an old or
+            // hand edited config file has a value outside the range
+            // the overlay page actually expects. I'd rather quietly
+            // pull it back into range than have the ring render at
+            // some broken size.
+            state.Size = Math.Clamp(state.Size, 5, 100);
+            state.Thickness = Math.Clamp(state.Thickness, 1, 50);
 
-        TimerEngine.Tick(state);
+            TimerEngine.Tick(state);
 
-        bool handled = TimerEngine.HandleCommon(cmd, qs, state, out string? error);
-        if (!handled)
-            TimerEngine.HandleRadialSpecific(cmd, qs, state, out error);
+            bool handled = TimerEngine.HandleCommon(cmd, qs, state, out string? error);
+            if (!handled)
+                TimerEngine.HandleRadialSpecific(cmd, qs, state, out error);
 
-        JsonStore.Save(state, Paths.RadialFile);
+            JsonStore.Save(state, Paths.RadialFile);
 
-        if (cmd is not ("status" or ""))
-            Logger.Log("[RADIAL]", error != null ? $"FAILED {cmd}: {error}" : cmd);
+            if (cmd is not ("status" or ""))
+                Logger.Log("[RADIAL]", error != null ? $"FAILED {cmd}: {error}" : cmd);
 
-        return BuildResponseJson(cmd, state, error);
-    }
-
-    private static string BuildResponseJson(string cmd, OverlayState state, string? error)
-    {
-        if (error != null)
-            return System.Text.Json.JsonSerializer.Serialize(new { ok = false, error });
-        return System.Text.Json.JsonSerializer.Serialize(new { ok = true, cmd, state });
+            if (error != null)
+                return System.Text.Json.JsonSerializer.Serialize(new { ok = false, error });
+            return System.Text.Json.JsonSerializer.Serialize(new { ok = true, cmd, state });
+        }
     }
 
     // ------------------------------------------------------------
