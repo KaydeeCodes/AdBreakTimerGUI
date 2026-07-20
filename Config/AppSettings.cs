@@ -34,4 +34,13 @@ public class AppSettings
     // streaming.
     [JsonPropertyName("minimizeToTrayOnClose")]
     public bool MinimizeToTrayOnClose { get; set; } = true;
+    
+    
+    // Whether the app should watch Twitch's EventSub feed and fire
+    // overlays automatically, rather than me needing Streamer.bot (or
+    // anything else) sending commands manually. Not wired up to
+    // anything yet, the checkbox for this on the main window stays
+    // disabled until the actual Twitch connection exists.
+    [JsonPropertyName("autoDetectAds")]
+    public bool AutoDetectAds { get; set; } = false;
 }

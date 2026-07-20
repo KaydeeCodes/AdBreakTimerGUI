@@ -16,11 +16,21 @@ public static class TimeParsing
             return Math.Abs(int.Parse(parts[0])) * 60 + Math.Abs(int.Parse(parts[1]));
         return int.TryParse(value, out int seconds) ? Math.Abs(seconds) : 0;
     }
-    
-    // For text boxes rather than a trusted query string, I want proper
-    // validation instead of just letting HmsToSecs quietly return 0 on
-    // rubbish input. Returns false with a readable error message if the
-    // text can't be understood or comes out to zero or less.
+
+    // The other direction, turning a whole number of seconds back into
+    // hh:mm:ss for logging or display.
+    public static string SecsToHms(int totalSeconds)
+    {
+        totalSeconds = Math.Max(0, totalSeconds);
+        return $"{totalSeconds / 3600:D2}:{totalSeconds % 3600 / 60:D2}:{totalSeconds % 60:D2}";
+    }
+
+    // Returns false with a readable error instead of throwing. I route
+    // every time value through this now, whether it's from a text box
+    // or an API query string, rather than calling HmsToSecs directly.
+    // HmsToSecs itself can throw on genuinely bad input, int.Parse
+    // isn't forgiving, so this is what keeps a malformed value from
+    // escaping all the way up as an unhandled exception.
     public static bool TryParseDuration(string value, out int seconds, out string? error)
     {
         error = null;
@@ -30,20 +40,17 @@ public static class TimeParsing
         {
             seconds = HmsToSecs(value);
         }
-        catch (FormatException)
+        catch
         {
+            // Catching everything here, not just FormatException. A
+            // huge number of digits throws OverflowException instead,
+            // and either way the input just wasn't something I can
+            // use, so the caller gets the same readable error regardless
+            // of which one it was.
             error = "Couldn't read that as mm:ss, hh:mm:ss, or a number of seconds.";
             return false;
         }
         if (seconds <= 0) { error = "Time must be greater than zero."; return false; }
         return true;
-    }
-
-    // The other direction, turning a whole number of seconds back into
-    // hh:mm:ss for logging or display.
-    public static string SecsToHms(int totalSeconds)
-    {
-        totalSeconds = Math.Max(0, totalSeconds);
-        return $"{totalSeconds / 3600:D2}:{totalSeconds % 3600 / 60:D2}:{totalSeconds % 60:D2}";
     }
 }

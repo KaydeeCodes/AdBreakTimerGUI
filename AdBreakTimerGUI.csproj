@@ -11,7 +11,14 @@
 
     <ItemGroup>
       <Folder Include="Assets\" />
-      <Folder Include="Web\" />
+        <EmbeddedResource Include="Web\bar.html" />
+        <EmbeddedResource Include="Web\radial.html" />
+    </ItemGroup>
+
+    <ItemGroup>
+      <Compile Update="Gui\OverlaySettingsForm.cs">
+        <SubType>Form</SubType>
+      </Compile>
     </ItemGroup>
 
 </Project>

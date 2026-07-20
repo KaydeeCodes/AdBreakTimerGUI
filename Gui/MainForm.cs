@@ -1,6 +1,7 @@
 using System.Diagnostics;
 using AdBreakTimerGUI.Config;
 using AdBreakTimerGUI.Engine;
+using AdBreakTimerGUI.Gui;
 using AdBreakTimerGUI.Server;
 
 namespace AdBreakTimerGUI;
@@ -16,6 +17,19 @@ public partial class MainForm : Form
     // the port after a successful start, the ad timing when I click
     // Save settings, and so on.
     private AppSettings _settings = new();
+
+    // The three colours the LED can actually be. Pulled out as fields
+    // rather than typed inline everywhere, so if I ever want to tweak
+    // the exact shade there's one place to do it.
+    private static readonly Color ColorRunningOk = Color.ForestGreen;
+    private static readonly Color ColorRunningWithErrors = Color.FromArgb(0xF5, 0xA6, 0x23); // amber, matches the mockup's warning colour
+    private static readonly Color ColorStopped = Color.Firebrick;
+
+    // True once at least one [ERROR] has been logged since the server
+    // last started. Reset back to false every time StartServer()
+    // succeeds, so a fresh start always begins green even if the
+    // previous run ended with errors logged.
+    private bool _hasErrorSinceStart;
 
     // Controls I need to reach from more than one method are kept as
     // fields. Anything only used inside BuildUi stays a local variable.
@@ -60,6 +74,22 @@ public partial class MainForm : Form
         // every place that calls Start() or Stop().
         _server.StatusChanged += OnServerStatusChanged;
 
+        // And the same for errors, anything that calls Logger.Log with
+        // an [ERROR] tag flips the light to amber while the server's
+        // still running. See Logger.cs for why this lives there rather
+        // than being tracked separately in several places.
+        Logger.ErrorLogged += OnErrorLogged;
+
+        // The LED and status text were previously only ever updated by
+        // OnServerStatusChanged, which only fires once Start() or
+        // Stop() actually runs. With auto start off, neither runs at
+        // launch, so the LED was sitting at whatever colour BuildUi
+        // happened to create it with, regardless of what the label next
+        // to it said. Calling this once here makes sure what's on
+        // screen always matches the server's real state from the very
+        // first frame, not just after the first state change.
+        RefreshStatusDisplay();
+
         if (_settings.StartAutomatically)
             StartServer();
     }
@@ -80,7 +110,7 @@ public partial class MainForm : Form
         MaximizeBox = false;
         StartPosition = FormStartPosition.CenterScreen;
         Font = new Font("Segoe UI", 9F);
-        
+
         // I'm extracting this from the exe's own icon resource rather
         // than loading Assets/app.ico separately. ApplicationIcon in
         // the csproj is what actually embeds it into the exe in the
@@ -91,11 +121,16 @@ public partial class MainForm : Form
         int y = 16;
 
         // ---- Status row: LED, status text, port, start/stop button ----
+        // I'm not setting BackColor here any more, it used to be
+        // hardcoded to green, which is exactly what caused the LED to
+        // show the wrong colour on a launch with auto start off. The
+        // real colour gets set once by RefreshStatusDisplay() right
+        // after BuildUi runs, and from then on by whatever actually
+        // changes (OnServerStatusChanged / OnErrorLogged).
         _ledPanel = new Panel
         {
             Location = new Point(16, y),
-            Size = new Size(16, 16),
-            BackColor = Color.ForestGreen
+            Size = new Size(16, 16)
         };
         // A plain Panel is a square by default. I paint it as a circle
         // instead so it reads as a status dot, same idea as the LED in
@@ -110,23 +145,20 @@ public partial class MainForm : Form
         {
             Location = new Point(40, y - 2),
             AutoSize = true,
-            Font = new Font("Segoe UI", 10F, FontStyle.Bold),
-            Text = "Stopped"
+            Font = new Font("Segoe UI", 10F, FontStyle.Bold)
         };
 
         _lblPort = new Label
         {
             Location = new Point(40, y + 18),
             AutoSize = true,
-            ForeColor = Color.Gray,
-            Text = "Not listening"
+            ForeColor = Color.Gray
         };
 
         _btnToggle = new Button
         {
             Location = new Point(300, y - 4),
-            Size = new Size(120, 30),
-            Text = "Start service"
+            Size = new Size(120, 30)
         };
         _btnToggle.Click += (_, _) => ToggleServer();
 
@@ -230,6 +262,23 @@ public partial class MainForm : Form
         Controls.Add(NewSeparator(y));
         y += 16;
 
+        // ---- Overlay appearance ----
+        Controls.Add(NewSectionLabel("OVERLAY APPEARANCE", y));
+        y += 22;
+
+        Button btnOverlaySettings = new()
+        {
+            Location = new Point(16, y),
+            Size = new Size(404, 30),
+            Text = "Bar / Radial settings..."
+        };
+        btnOverlaySettings.Click += (_, _) => OpenOverlaySettings();
+        Controls.Add(btnOverlaySettings);
+        y += 46;
+
+        Controls.Add(NewSeparator(y));
+        y += 16;
+
         // ---- Twitch account (locked for now, this is the phase two bit) ----
         Controls.Add(NewSectionLabel("TWITCH ACCOUNT", y));
         y += 22;
@@ -245,7 +294,24 @@ public partial class MainForm : Form
         var tip = new ToolTip();
         tip.SetToolTip(btnTwitchConnect, "Coming in a future update");
         Controls.Add(btnTwitchConnect);
-        y += 40;
+        y += 32;
+
+        // Cosmetic only for now, greyed out until there's an actual
+        // Twitch connection behind it. Once EventSub is wired up, this
+        // is what flips the app from "wait for a URL command" to
+        // "watch channel.ad_break.begin and fire go automatically".
+        CheckBox chkAutoDetectAds = new()
+        {
+            Location = new Point(16, y),
+            AutoSize = true,
+            Text = "Auto detect ads and start the overlay automatically",
+            Checked = _settings.AutoDetectAds,
+            Enabled = false
+        };
+        var tipAuto = new ToolTip();
+        tipAuto.SetToolTip(chkAutoDetectAds, "Needs a connected Twitch account, coming in a future update");
+        Controls.Add(chkAutoDetectAds);
+        y += 32;
 
         Controls.Add(NewSeparator(y));
         y += 16;
@@ -377,6 +443,7 @@ public partial class MainForm : Form
         }
         catch (Exception ex)
         {
+            Logger.Log("[ERROR]", $"Failed to start server: {ex}");
             MessageBox.Show(this, $"Couldn't start the web service: {ex.Message}", "Ad Break Timer",
                 MessageBoxButtons.OK, MessageBoxIcon.Error);
         }
@@ -397,14 +464,65 @@ public partial class MainForm : Form
             return;
         }
 
-        _ledPanel.BackColor = isRunning ? Color.ForestGreen : Color.Firebrick;
+        // A fresh start always begins green, even if the previous run
+        // ended with errors logged. Only reset this on the transition
+        // into "running", not on every call, otherwise a Stop() right
+        // after an error would also wipe the flag before I've had a
+        // chance to see it.
+        if (isRunning) _hasErrorSinceStart = false;
+
+        RefreshStatusDisplay();
+    }
+
+    // Raised by Logger whenever an [ERROR] line gets written anywhere
+    // in the app. Same threading caveat as OnServerStatusChanged, this
+    // can fire from a background thread.
+    private void OnErrorLogged()
+    {
+        if (InvokeRequired)
+        {
+            Invoke(OnErrorLogged);
+            return;
+        }
+
+        _hasErrorSinceStart = true;
+        RefreshStatusDisplay();
+    }
+
+    // The single place that decides what the LED, status label, port
+    // label, toggle button, and tray icon text should actually say,
+    // based on _server.IsRunning and _hasErrorSinceStart. Called from
+    // three places: once right after BuildUi (so the very first frame
+    // is correct even if auto start is off), and again whenever either
+    // of those two things changes.
+    private void RefreshStatusDisplay()
+    {
+        if (!_server.IsRunning)
+        {
+            _ledPanel.BackColor = ColorStopped;
+            _lblStatus.Text = "Stopped";
+            _lblPort.Text = "Not listening";
+            _btnToggle.Text = "Start service";
+            _trayIcon.Text = "Ad Break Timer (stopped)";
+        }
+        else if (_hasErrorSinceStart)
+        {
+            _ledPanel.BackColor = ColorRunningWithErrors;
+            _lblStatus.Text = "Running (errors logged)";
+            _lblPort.Text = $"Listening on localhost:{_server.Port}";
+            _btnToggle.Text = "Stop service";
+            _trayIcon.Text = $"Ad Break Timer (running with errors, port {_server.Port})";
+        }
+        else
+        {
+            _ledPanel.BackColor = ColorRunningOk;
+            _lblStatus.Text = "Running";
+            _lblPort.Text = $"Listening on localhost:{_server.Port}";
+            _btnToggle.Text = "Stop service";
+            _trayIcon.Text = $"Ad Break Timer (running, port {_server.Port})";
+        }
+
         _ledPanel.Invalidate();
-        _lblStatus.Text = isRunning ? "Running" : "Stopped";
-        _lblPort.Text = isRunning ? $"Listening on localhost:{_server.Port}" : "Not listening";
-        _btnToggle.Text = isRunning ? "Stop service" : "Start service";
-
-        _trayIcon.Text = isRunning ? $"Ad Break Timer (running, port {_server.Port})" : "Ad Break Timer (stopped)";
-
         RefreshLinkText();
     }
 
@@ -460,6 +578,16 @@ public partial class MainForm : Form
         revertTimer.Start();
     }
 
+    // Opens the Bar/Radial appearance settings as a modal dialog. I'm
+    // not keeping a field for this one since it's only ever open for
+    // as long as I'm using it, unlike the tray icon or the server,
+    // which live for the whole lifetime of the app.
+    private void OpenOverlaySettings()
+    {
+        using var dlg = new OverlaySettingsForm();
+        dlg.ShowDialog(this);
+    }
+
     // ------------------------------------------------------------
     // System tray
     // ------------------------------------------------------------
@@ -475,11 +603,7 @@ public partial class MainForm : Form
 
         _trayIcon = new NotifyIcon
         {
-            // SystemIcons.Application is a stand in until I've got a
-            // proper .ico for this. Swapping it later is a one line
-            // change here, nothing else needs to know about it.
             Icon = Icon.ExtractAssociatedIcon(Application.ExecutablePath) ?? SystemIcons.Application,
-            Text = "Ad Break Timer (stopped)",
             Visible = true,
             ContextMenuStrip = menu
         };
@@ -513,8 +637,10 @@ public partial class MainForm : Form
             return;
         }
 
+        Logger.ErrorLogged -= OnErrorLogged;
         _server.Stop();
         _trayIcon.Visible = false;
+        _trayIcon.Dispose();
         base.OnFormClosing(e);
     }
 }
