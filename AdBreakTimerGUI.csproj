@@ -9,9 +9,6 @@
     </PropertyGroup>
 
     <ItemGroup>
-      <Folder Include="Config\" />
-      <Folder Include="Engine\" />
-      <Folder Include="Server\" />
       <Folder Include="Web\" />
     </ItemGroup>
 
