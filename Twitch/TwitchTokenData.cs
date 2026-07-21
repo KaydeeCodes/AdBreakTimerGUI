@@ -2,7 +2,6 @@
 
 namespace AdBreakTimerGUI.Twitch;
 
-// The shape of what I remember about a connected account between launches, TwitchTokenStore is what actually saves/loads it encrypted.
 public class TwitchTokenData
 {
     [JsonPropertyName("accessToken")]
@@ -12,7 +11,7 @@ public class TwitchTokenData
     public string RefreshToken { get; set; } = "";
 
     [JsonPropertyName("expiresAt")]
-    public DateTime ExpiresAt { get; set; } // absolute time, not "expires in N seconds", so I only need UtcNow to check it
+    public DateTime ExpiresAt { get; set; }
 
     [JsonPropertyName("userId")]
     public string UserId { get; set; } = "";
@@ -23,7 +22,10 @@ public class TwitchTokenData
     [JsonPropertyName("displayName")]
     public string DisplayName { get; set; } = "";
 
-    // Refreshes a couple of minutes early rather than right on the edge.
+    // Twitch's profile picture URL, shown next to "Connected as..." on the Twitch tab. Fetched once at connect time, carried forward on refresh rather than re-fetched every time.
+    [JsonPropertyName("profileImageUrl")]
+    public string ProfileImageUrl { get; set; } = "";
+
     [JsonIgnore]
     public bool IsExpiredOrExpiringSoon => DateTime.UtcNow >= ExpiresAt.AddMinutes(-2);
 }
