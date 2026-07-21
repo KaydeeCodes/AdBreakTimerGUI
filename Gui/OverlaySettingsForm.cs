@@ -12,10 +12,11 @@ public class OverlaySettingsForm : Form
     private ComboBox _cmbBarDirection = null!;
     private NumericUpDown _numBarHeight = null!;
     private TextBox _txtBarWidth = null!;
-    private TextBox _txtBarColor = null!;
+    private TextBox _txtBarAdFreeColor = null!;
+    private TextBox _txtBarAdColor = null!;
     private TextBox _txtBarFinishColor = null!;
     private TextBox _txtBarBgColor = null!;
-    private CheckBox _chkBarFlash = null!;
+    private ComboBox _cmbBarFinishStyle = null!;
     private NumericUpDown _numBarFlashDuration = null!;
 
     private ComboBox _cmbRadialDirection = null!;
@@ -23,10 +24,11 @@ public class OverlaySettingsForm : Form
     private NumericUpDown _numRadialThickness = null!;
     private TextBox _txtRadialTrackColor = null!;
     private ComboBox _cmbRadialRotation = null!;
-    private TextBox _txtRadialColor = null!;
+    private TextBox _txtRadialAdFreeColor = null!;
+    private TextBox _txtRadialAdColor = null!;
     private TextBox _txtRadialFinishColor = null!;
     private TextBox _txtRadialBgColor = null!;
-    private CheckBox _chkRadialFlash = null!;
+    private ComboBox _cmbRadialFinishStyle = null!;
     private NumericUpDown _numRadialFlashDuration = null!;
 
     private const int LabelX = 16;
@@ -48,14 +50,15 @@ public class OverlaySettingsForm : Form
     private void BuildUi()
     {
         Text = "Overlay settings";
-        ClientSize = new Size(460, 500);
+        // Grown again to fit the new background colour hint on both tabs without cramping the rows below it.
+        ClientSize = new Size(460, 570);
         FormBorderStyle = FormBorderStyle.FixedDialog;
         MaximizeBox = false;
         MinimizeBox = false;
         StartPosition = FormStartPosition.CenterParent;
         Font = new Font("Segoe UI", 9F);
 
-        var tabs = new TabControl { Location = new Point(12, 12), Size = new Size(436, 430) };
+        var tabs = new TabControl { Location = new Point(12, 12), Size = new Size(436, 490) };
 
         var barTab = new TabPage("Bar");
         var radialTab = new TabPage("Radial");
@@ -67,10 +70,10 @@ public class OverlaySettingsForm : Form
 
         Controls.Add(tabs);
 
-        var btnSave = new Button { Location = new Point(12, 452), Size = new Size(220, 32), Text = "Save" };
+        var btnSave = new Button { Location = new Point(12, 512), Size = new Size(220, 32), Text = "Save" };
         btnSave.Click += (_, _) => SaveAndClose();
 
-        var btnCancel = new Button { Location = new Point(238, 452), Size = new Size(220, 32), Text = "Cancel" };
+        var btnCancel = new Button { Location = new Point(238, 512), Size = new Size(220, 32), Text = "Cancel" };
         btnCancel.Click += (_, _) => Close();
 
         Controls.Add(btnSave);
@@ -111,6 +114,20 @@ public class OverlaySettingsForm : Form
         return textBox;
     }
 
+    // Small grey note under a colour row, same pattern as the track colour hint, used now for background colour too since it has the same "Pick can't do transparent" limitation.
+    private static void NewColorHint(TabPage tab, int y, string text)
+    {
+        var hint = new Label
+        {
+            Location = new Point(LabelX, y),
+            Size = new Size(420, 20),
+            ForeColor = Color.Gray,
+            Font = new Font("Segoe UI", 7.5F),
+            Text = text
+        };
+        tab.Controls.Add(hint);
+    }
+
     private static void OpenColorPicker(TextBox target)
     {
         using var dlg = new ColorDialog { FullOpen = true };
@@ -142,25 +159,25 @@ public class OverlaySettingsForm : Form
         _txtBarWidth = new TextBox { Location = new Point(ControlX, 88), Size = new Size(ControlWidth, 23), Text = _barState.BarWidth };
         tab.Controls.Add(_txtBarWidth);
 
-        var hint = new Label
-        {
-            Location = new Point(LabelX, 118),
-            Size = new Size(420, 34),
-            ForeColor = Color.Gray,
-            Font = new Font("Segoe UI", 7.5F),
-            Text = "Width accepts a CSS value, e.g. 100% or 800px."
-        };
-        tab.Controls.Add(hint);
+        NewColorHint(tab, 118, "Width accepts a CSS value, e.g. 100% or 800px.");
 
-        _txtBarColor = NewColorRow(tab, "Running colour", 160, _barState.PreferredColor);
-        _txtBarFinishColor = NewColorRow(tab, "Finish colour", 196, _barState.FinishColor);
-        _txtBarBgColor = NewColorRow(tab, "Background colour", 232, _barState.BgColor);
+        _txtBarAdFreeColor = NewColorRow(tab, "Ad-free colour", 160, _barState.PreferredColor);
+        _txtBarAdColor = NewColorRow(tab, "Ad colour", 196, _barState.AdColor);
+        _txtBarFinishColor = NewColorRow(tab, "Idle/finish colour", 232, _barState.FinishColor);
+        _txtBarBgColor = NewColorRow(tab, "Background colour", 268, _barState.BgColor);
 
-        _chkBarFlash = new CheckBox { Location = new Point(LabelX, 268), AutoSize = true, Text = "Flash on finish", Checked = _barState.FlashOnFinish };
-        tab.Controls.Add(_chkBarFlash);
+        NewColorHint(tab, 300, "The picker only does solid colours, type transparent directly to keep it see-through.");
 
-        tab.Controls.Add(NewFieldLabel("Flash duration (s)", 300));
-        _numBarFlashDuration = new NumericUpDown { Location = new Point(ControlX, 297), Size = new Size(ControlWidth, 23), Minimum = 0, Maximum = 300, Value = Math.Clamp(_barState.FlashDuration, 0, 300) };
+        tab.Controls.Add(NewFieldLabel("Idle/finish style", 326));
+        _cmbBarFinishStyle = new ComboBox { Location = new Point(ControlX, 323), Size = new Size(ControlWidth, 23), DropDownStyle = ComboBoxStyle.DropDownList };
+        _cmbBarFinishStyle.Items.Add("flash");
+        _cmbBarFinishStyle.Items.Add("static");
+        _cmbBarFinishStyle.Items.Add("hidden");
+        _cmbBarFinishStyle.SelectedItem = _barState.FinishStyle is "flash" or "static" or "hidden" ? _barState.FinishStyle : "flash";
+        tab.Controls.Add(_cmbBarFinishStyle);
+
+        tab.Controls.Add(NewFieldLabel("Idle/finish duration (s)", 362));
+        _numBarFlashDuration = new NumericUpDown { Location = new Point(ControlX, 359), Size = new Size(ControlWidth, 23), Minimum = 0, Maximum = 300, Value = Math.Clamp(_barState.FlashDuration, 0, 300) };
         tab.Controls.Add(_numBarFlashDuration);
     }
 
@@ -183,15 +200,7 @@ public class OverlaySettingsForm : Form
 
         _txtRadialTrackColor = NewColorRow(tab, "Track colour", 124, _radialState.TrackColor);
 
-        var trackHint = new Label
-        {
-            Location = new Point(LabelX, 148),
-            Size = new Size(420, 22),
-            ForeColor = Color.Gray,
-            Font = new Font("Segoe UI", 7.5F),
-            Text = "The picker only does solid colours, type rgba(...) here directly for transparency."
-        };
-        tab.Controls.Add(trackHint);
+        NewColorHint(tab, 148, "The picker only does solid colours, type rgba(...) here directly for transparency.");
 
         tab.Controls.Add(NewFieldLabel("Rotation", 179));
         _cmbRadialRotation = new ComboBox { Location = new Point(ControlX, 176), Size = new Size(ControlWidth, 23), DropDownStyle = ComboBoxStyle.DropDownList };
@@ -202,15 +211,23 @@ public class OverlaySettingsForm : Form
         _cmbRadialRotation.SelectedIndex = (_radialState.RotationDegrees / 90) % 4;
         tab.Controls.Add(_cmbRadialRotation);
 
-        _txtRadialColor = NewColorRow(tab, "Running colour", 215, _radialState.PreferredColor);
-        _txtRadialFinishColor = NewColorRow(tab, "Finish colour", 251, _radialState.FinishColor);
-        _txtRadialBgColor = NewColorRow(tab, "Background colour", 287, _radialState.BgColor);
+        _txtRadialAdFreeColor = NewColorRow(tab, "Ad-free colour", 215, _radialState.PreferredColor);
+        _txtRadialAdColor = NewColorRow(tab, "Ad colour", 251, _radialState.AdColor);
+        _txtRadialFinishColor = NewColorRow(tab, "Idle/finish colour", 287, _radialState.FinishColor);
+        _txtRadialBgColor = NewColorRow(tab, "Background colour", 323, _radialState.BgColor);
 
-        _chkRadialFlash = new CheckBox { Location = new Point(LabelX, 323), AutoSize = true, Text = "Flash on finish", Checked = _radialState.FlashOnFinish };
-        tab.Controls.Add(_chkRadialFlash);
+        NewColorHint(tab, 355, "The picker only does solid colours, type transparent directly to keep it see-through.");
 
-        tab.Controls.Add(NewFieldLabel("Flash duration (s)", 355));
-        _numRadialFlashDuration = new NumericUpDown { Location = new Point(ControlX, 352), Size = new Size(ControlWidth, 23), Minimum = 0, Maximum = 300, Value = Math.Clamp(_radialState.FlashDuration, 0, 300) };
+        tab.Controls.Add(NewFieldLabel("Idle/finish style", 384));
+        _cmbRadialFinishStyle = new ComboBox { Location = new Point(ControlX, 381), Size = new Size(ControlWidth, 23), DropDownStyle = ComboBoxStyle.DropDownList };
+        _cmbRadialFinishStyle.Items.Add("flash");
+        _cmbRadialFinishStyle.Items.Add("static");
+        _cmbRadialFinishStyle.Items.Add("hidden");
+        _cmbRadialFinishStyle.SelectedItem = _radialState.FinishStyle is "flash" or "static" or "hidden" ? _radialState.FinishStyle : "flash";
+        tab.Controls.Add(_cmbRadialFinishStyle);
+
+        tab.Controls.Add(NewFieldLabel("Idle/finish duration (s)", 420));
+        _numRadialFlashDuration = new NumericUpDown { Location = new Point(ControlX, 417), Size = new Size(ControlWidth, 23), Minimum = 0, Maximum = 300, Value = Math.Clamp(_radialState.FlashDuration, 0, 300) };
         tab.Controls.Add(_numRadialFlashDuration);
     }
 
@@ -230,25 +247,27 @@ public class OverlaySettingsForm : Form
 
     private void SaveAndClose()
     {
-        if (!TryParseColorField(_txtBarColor, "Bar running colour", out string barColor)) return;
-        if (!TryParseColorField(_txtBarFinishColor, "Bar finish colour", out string barFinishColor)) return;
+        if (!TryParseColorField(_txtBarAdFreeColor, "Bar ad-free colour", out string barAdFreeColor)) return;
+        if (!TryParseColorField(_txtBarAdColor, "Bar ad colour", out string barAdColor)) return;
+        if (!TryParseColorField(_txtBarFinishColor, "Bar idle/finish colour", out string barFinishColor)) return;
         if (!TryParseColorField(_txtBarBgColor, "Bar background colour", out string barBgColor)) return;
         if (!TryParseColorField(_txtRadialTrackColor, "Radial track colour", out string radialTrackColor)) return;
-        if (!TryParseColorField(_txtRadialColor, "Radial running colour", out string radialColor)) return;
-        if (!TryParseColorField(_txtRadialFinishColor, "Radial finish colour", out string radialFinishColor)) return;
+        if (!TryParseColorField(_txtRadialAdFreeColor, "Radial ad-free colour", out string radialAdFreeColor)) return;
+        if (!TryParseColorField(_txtRadialAdColor, "Radial ad colour", out string radialAdColor)) return;
+        if (!TryParseColorField(_txtRadialFinishColor, "Radial idle/finish colour", out string radialFinishColor)) return;
         if (!TryParseColorField(_txtRadialBgColor, "Radial background colour", out string radialBgColor)) return;
 
         string barDirection = (string)_cmbBarDirection.SelectedItem!;
         int barHeight = (int)_numBarHeight.Value;
         string barWidth = string.IsNullOrWhiteSpace(_txtBarWidth.Text) ? "100%" : _txtBarWidth.Text.Trim();
-        bool barFlash = _chkBarFlash.Checked;
+        string barFinishStyle = (string)_cmbBarFinishStyle.SelectedItem!;
         int barFlashDuration = (int)_numBarFlashDuration.Value;
 
         string radialDirection = (string)_cmbRadialDirection.SelectedItem!;
         int radialSize = (int)_numRadialSize.Value;
         int radialThickness = (int)_numRadialThickness.Value;
         int radialRotation = _cmbRadialRotation.SelectedIndex * 90;
-        bool radialFlash = _chkRadialFlash.Checked;
+        string radialFinishStyle = (string)_cmbRadialFinishStyle.SelectedItem!;
         int radialFlashDuration = (int)_numRadialFlashDuration.Value;
 
         OverlayCommandExecutor.UpdateBarAppearance(state =>
@@ -256,10 +275,11 @@ public class OverlaySettingsForm : Form
             state.Direction = barDirection;
             state.BarHeight = barHeight;
             state.BarWidth = barWidth;
-            state.PreferredColor = barColor;
+            state.PreferredColor = barAdFreeColor;
+            state.AdColor = barAdColor;
             state.FinishColor = barFinishColor;
             state.BgColor = barBgColor;
-            state.FlashOnFinish = barFlash;
+            state.FinishStyle = barFinishStyle;
             state.FlashDuration = barFlashDuration;
         });
 
@@ -270,10 +290,11 @@ public class OverlaySettingsForm : Form
             state.Thickness = radialThickness;
             state.TrackColor = radialTrackColor;
             state.RotationDegrees = radialRotation;
-            state.PreferredColor = radialColor;
+            state.PreferredColor = radialAdFreeColor;
+            state.AdColor = radialAdColor;
             state.FinishColor = radialFinishColor;
             state.BgColor = radialBgColor;
-            state.FlashOnFinish = radialFlash;
+            state.FinishStyle = radialFinishStyle;
             state.FlashDuration = radialFlashDuration;
         });
 

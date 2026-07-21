@@ -4,7 +4,7 @@ using AdBreakTimerGUI.Twitch;
 
 namespace AdBreakTimerGUI.Gui;
 
-// Runs the device code flow and shows its progress. Approving happens in a browser, not here, so this window's job is: ask for a code, show it, open the browser, then wait for Twitch to confirm.
+// Runs the device code flow and shows its progress, approving happens in a browser, not here.
 public class TwitchConnectForm : Form
 {
     public TwitchTokenData? Result { get; private set; }
@@ -22,7 +22,7 @@ public class TwitchConnectForm : Form
     public TwitchConnectForm()
     {
         BuildUi();
-        // Kicked off after Shown, not before, so there's something on screen the instant this opens rather than a blank window mid-request.
+        // Kicked off after Shown, not before, so there's something on screen the instant this opens.
         Shown += (_, _) => _ = RunConnectFlowAsync();
     }
 
@@ -63,7 +63,7 @@ public class TwitchConnectForm : Form
         CancelButton = _btnCancel;
     }
 
-    // Fired by ConnectAsync the moment Twitch hands back a device code. No InvokeRequired needed here, unlike Logger.ErrorLogged or WebServerHost.StatusChanged, RunConnectFlowAsync started on the UI thread, so every await inside ConnectAsync resumes back on it automatically via WinForms' SynchronizationContext.
+    // No InvokeRequired check needed here, RunConnectFlowAsync started on the UI thread, so this callback resumes back on it automatically.
     private void OnCodeReady(DeviceCodeInfo info)
     {
         _verificationUri = info.VerificationUri;
@@ -119,7 +119,7 @@ public class TwitchConnectForm : Form
         }
         catch (OperationCanceledException)
         {
-            // Cancelled deliberately, Cancel button or the window closing, nothing left to show.
+            // Cancelled deliberately, Cancel button or window closing, nothing left to show.
         }
     }
 

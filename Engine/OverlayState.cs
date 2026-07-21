@@ -17,22 +17,30 @@ public class OverlayState
     [JsonPropertyName("lastTick")]
     public DateTime? LastTick { get; set; }
 
-    // The colour actually on screen right now. Changes on every go call, including the automatic red/green cycle, this is not a saved preference, it's whatever's currently being displayed.
     [JsonPropertyName("color")]
     public string Color { get; set; } = "#00ff00";
 
-    // The saved preference from Overlay Settings, only ever written there. Added after a real bug: the automatic Twitch cycle was reading/writing the plain Color field above to show red during ads, which silently overwrote whatever custom colour someone had picked, since that field was being used for two different jobs at once. This one's never touched by go, only by the settings dialog.
     [JsonPropertyName("preferredColor")]
     public string PreferredColor { get; set; } = "#00ff00";
 
+    [JsonPropertyName("adColor")]
+    public string AdColor { get; set; } = "#ff0000";
+
     [JsonPropertyName("finishColor")]
-    public string FinishColor { get; set; } = "#ff0000"; // only ever set explicitly via finish=/setfinishcolor, safe from this same problem
+    public string FinishColor { get; set; } = "#ff0000";
 
     [JsonPropertyName("bgColor")]
     public string BgColor { get; set; } = "transparent";
 
+    [JsonPropertyName("finishStyle")]
+    public string FinishStyle { get; set; } = "flash";
+
+    // Setter only, deliberately no getter, this is the actual fix. With a getter present, this property got written back out on every single save (derived from FinishStyle at that moment), and then re-applied on the very next load, silently overriding "hidden" (or anything but flash/static) back to a two-state value. A setter-only property can still read an old file's genuine "flashOnFinish" key during deserialization, but System.Text.Json has nothing to read here, so it's never written out again, no more self-poisoning round trip.
     [JsonPropertyName("flashOnFinish")]
-    public bool FlashOnFinish { get; set; } = true;
+    public bool LegacyFlashOnFinish
+    {
+        set => FinishStyle = value ? "flash" : "static";
+    }
 
     [JsonPropertyName("flashDuration")]
     public int FlashDuration { get; set; } = 30;
