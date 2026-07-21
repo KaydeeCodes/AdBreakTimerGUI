@@ -4,9 +4,7 @@ using System.Text.Json.Serialization;
 
 namespace AdBreakTimerGUI.Twitch;
 
-// What the caller gets back the moment Twitch hands over a device code,
-// this is what actually gets shown to me, the short code and the URL
-// to go type it into.
+// What the caller gets the moment Twitch hands back a device code, the short code and URL to go type it into.
 public class DeviceCodeInfo
 {
     public string UserCode { get; set; } = "";
@@ -14,35 +12,40 @@ public class DeviceCodeInfo
     public int ExpiresInSeconds { get; set; }
 }
 
-// Implements Twitch's Device Code Grant Flow. No secret anywhere in
-// here, that's the whole point of registering as a Public client, see
-// TwitchConstants.cs for why that's safe for a shipped desktop app.
+// Twitch's Device Code Grant Flow, no secret anywhere, that's the point of the Public client type.
 public static class TwitchAuthService
 {
     private static readonly HttpClient Http = new();
 
-    // Kicks off the whole flow. onCodeReady fires once, as soon as
-    // Twitch hands back a code, that's the caller's cue to show the
-    // code on screen and open a browser to verificationUri. From there
-    // this method just polls quietly in the background until I've
-    // approved it (or it times out, or I cancel), and only returns
-    // once there's a real answer either way.
+    // onCodeReady fires once, my cue to show the code and open the browser. Polls quietly in the background from there until approved, denied, or timed out.
     public static async Task<TwitchTokenData?> ConnectAsync(Action<DeviceCodeInfo> onCodeReady, CancellationToken cancellationToken)
     {
-        var deviceResponse = await Http.PostAsync("https://id.twitch.tv/oauth2/device",
-            new FormUrlEncodedContent(new Dictionary<string, string>
-            {
-                ["client_id"] = TwitchConstants.ClientId,
-                ["scopes"] = TwitchConstants.Scopes
-            }), cancellationToken);
-
-        if (!deviceResponse.IsSuccessStatusCode)
+        DeviceCodeResponse? device;
+        try
         {
-            Config.Logger.Log("[ERROR]", $"Twitch device code request failed: {(int)deviceResponse.StatusCode} {await deviceResponse.Content.ReadAsStringAsync(cancellationToken)}");
+            var deviceResponse = await Http.PostAsync("https://id.twitch.tv/oauth2/device",
+                new FormUrlEncodedContent(new Dictionary<string, string>
+                {
+                    ["client_id"] = TwitchConstants.ClientId,
+                    ["scopes"] = TwitchConstants.Scopes
+                }), cancellationToken);
+
+            if (!deviceResponse.IsSuccessStatusCode)
+            {
+                Config.Logger.Log("[ERROR]", $"Twitch device code request failed: {(int)deviceResponse.StatusCode} {await deviceResponse.Content.ReadAsStringAsync(cancellationToken)}");
+                return null;
+            }
+
+            device = await deviceResponse.Content.ReadFromJsonAsync<DeviceCodeResponse>(cancellationToken: cancellationToken);
+        }
+        catch (OperationCanceledException) { throw; }
+        catch (Exception ex)
+        {
+            // Was unguarded before, a network blip here used to throw all the way out to the global crash handler instead of just failing the connect attempt cleanly.
+            Config.Logger.Log("[ERROR]", $"Twitch device code request threw: {ex.Message}");
             return null;
         }
 
-        var device = await deviceResponse.Content.ReadFromJsonAsync<DeviceCodeResponse>(cancellationToken: cancellationToken);
         if (device is null) return null;
 
         onCodeReady(new DeviceCodeInfo
@@ -52,9 +55,7 @@ public static class TwitchAuthService
             ExpiresInSeconds = device.ExpiresIn
         });
 
-        // Twitch tells me how often it wants me polling, in seconds.
-        // I respect that rather than picking my own interval, and
-        // widen it further if Twitch ever comes back with slow_down.
+        // Twitch tells me how often to poll, I respect that and widen it further on slow_down.
         int intervalSeconds = Math.Max(1, device.Interval);
         DateTime deadline = DateTime.UtcNow.AddSeconds(device.ExpiresIn);
 
@@ -64,13 +65,24 @@ public static class TwitchAuthService
 
             await Task.Delay(TimeSpan.FromSeconds(intervalSeconds), cancellationToken);
 
-            var tokenResponse = await Http.PostAsync("https://id.twitch.tv/oauth2/token",
-                new FormUrlEncodedContent(new Dictionary<string, string>
-                {
-                    ["client_id"] = TwitchConstants.ClientId,
-                    ["device_code"] = device.DeviceCode,
-                    ["grant_type"] = "urn:ietf:params:oauth:grant-type:device_code"
-                }), cancellationToken);
+            HttpResponseMessage tokenResponse;
+            try
+            {
+                tokenResponse = await Http.PostAsync("https://id.twitch.tv/oauth2/token",
+                    new FormUrlEncodedContent(new Dictionary<string, string>
+                    {
+                        ["client_id"] = TwitchConstants.ClientId,
+                        ["device_code"] = device.DeviceCode,
+                        ["grant_type"] = "urn:ietf:params:oauth:grant-type:device_code"
+                    }), cancellationToken);
+            }
+            catch (OperationCanceledException) { throw; }
+            catch (Exception ex)
+            {
+                // A single flaky poll shouldn't end the whole connect attempt, log it and just try again next interval.
+                Config.Logger.Log("[ERROR]", $"Twitch token poll threw: {ex.Message}");
+                continue;
+            }
 
             if (tokenResponse.IsSuccessStatusCode)
             {
@@ -93,21 +105,21 @@ public static class TwitchAuthService
                 return result;
             }
 
-            // Not successful yet, this is expected while I haven't
-            // approved it on the Twitch site. Read the error code
-            // Twitch sends back to decide whether to keep polling,
-            // slow down, or give up entirely.
+            // Not approved yet, expected while I haven't confirmed on Twitch's site.
             var errorBody = await tokenResponse.Content.ReadFromJsonAsync<DeviceErrorResponse>(cancellationToken: cancellationToken);
             switch (errorBody?.Message)
             {
                 case "authorization_pending":
-                    continue; // completely normal, I just haven't approved it yet
+                    continue;
                 case "slow_down":
                     intervalSeconds += 5;
+                    Config.Logger.Log("[TWITCH]", $"Twitch asked to slow down polling, now every {intervalSeconds}s.");
                     continue;
                 case "expired_token":
+                    Config.Logger.Log("[TWITCH]", "Twitch connect attempt expired before it was approved.");
                     return null;
                 case "access_denied":
+                    Config.Logger.Log("[TWITCH]", "Twitch connect attempt was denied.");
                     return null;
                 default:
                     Config.Logger.Log("[ERROR]", $"Twitch token poll failed: {(int)tokenResponse.StatusCode} {errorBody?.Message}");
@@ -115,67 +127,82 @@ public static class TwitchAuthService
             }
         }
 
-        return null; // ran out of time without ever getting approved
+        Config.Logger.Log("[TWITCH]", "Twitch connect attempt timed out.");
+        return null;
     }
 
-    // A separate, much smaller call, used once right after getting a
-    // token so I know which channel I'm actually connected to
-    // (display name for the GUI, user ID for the EventSub subscription
-    // condition later).
+    // Used once right after getting a token, for the display name shown in the GUI and the user ID EventSub needs.
     private static async Task<(string userId, string login, string displayName)> FetchUserInfoAsync(string accessToken, CancellationToken cancellationToken)
     {
-        using var request = new HttpRequestMessage(HttpMethod.Get, "https://api.twitch.tv/helix/users");
-        request.Headers.Add("Authorization", $"Bearer {accessToken}");
-        request.Headers.Add("Client-Id", TwitchConstants.ClientId);
+        try
+        {
+            using var request = new HttpRequestMessage(HttpMethod.Get, "https://api.twitch.tv/helix/users");
+            request.Headers.Add("Authorization", $"Bearer {accessToken}");
+            request.Headers.Add("Client-Id", TwitchConstants.ClientId);
 
-        var response = await Http.SendAsync(request, cancellationToken);
-        if (!response.IsSuccessStatusCode) return ("", "", "");
+            var response = await Http.SendAsync(request, cancellationToken);
+            if (!response.IsSuccessStatusCode)
+            {
+                Config.Logger.Log("[ERROR]", $"Fetching Twitch user info failed: {(int)response.StatusCode}");
+                return ("", "", "");
+            }
 
-        var body = await response.Content.ReadFromJsonAsync<HelixUsersResponse>(cancellationToken: cancellationToken);
-        var user = body?.Data?.FirstOrDefault();
-        return user is null ? ("", "", "") : (user.Id, user.Login, user.DisplayName);
+            var body = await response.Content.ReadFromJsonAsync<HelixUsersResponse>(cancellationToken: cancellationToken);
+            var user = body?.Data?.FirstOrDefault();
+            return user is null ? ("", "", "") : (user.Id, user.Login, user.DisplayName);
+        }
+        catch (OperationCanceledException) { throw; }
+        catch (Exception ex)
+        {
+            Config.Logger.Log("[ERROR]", $"Fetching Twitch user info threw: {ex.Message}");
+            return ("", "", "");
+        }
     }
 
-    // Exchanges a refresh token for a new access token, once the
-    // stored one's expired or close to it. Doesn't need a secret
-    // either, same as everything else in this file.
+    // Exchanges a refresh token for a new access token, no secret needed here either.
     public static async Task<TwitchTokenData?> RefreshAsync(TwitchTokenData current, CancellationToken cancellationToken)
     {
-        var response = await Http.PostAsync("https://id.twitch.tv/oauth2/token",
-            new FormUrlEncodedContent(new Dictionary<string, string>
-            {
-                ["client_id"] = TwitchConstants.ClientId,
-                ["refresh_token"] = current.RefreshToken,
-                ["grant_type"] = "refresh_token"
-            }), cancellationToken);
-
-        if (!response.IsSuccessStatusCode)
+        try
         {
-            Config.Logger.Log("[ERROR]", $"Twitch token refresh failed: {(int)response.StatusCode}");
+            var response = await Http.PostAsync("https://id.twitch.tv/oauth2/token",
+                new FormUrlEncodedContent(new Dictionary<string, string>
+                {
+                    ["client_id"] = TwitchConstants.ClientId,
+                    ["refresh_token"] = current.RefreshToken,
+                    ["grant_type"] = "refresh_token"
+                }), cancellationToken);
+
+            if (!response.IsSuccessStatusCode)
+            {
+                Config.Logger.Log("[ERROR]", $"Twitch token refresh failed: {(int)response.StatusCode}");
+                return null;
+            }
+
+            var tokenData = await response.Content.ReadFromJsonAsync<TokenSuccessResponse>(cancellationToken: cancellationToken);
+            if (tokenData is null) return null;
+
+            var updated = new TwitchTokenData
+            {
+                AccessToken = tokenData.AccessToken,
+                RefreshToken = tokenData.RefreshToken,
+                ExpiresAt = DateTime.UtcNow.AddSeconds(tokenData.ExpiresIn),
+                UserId = current.UserId,
+                Login = current.Login,
+                DisplayName = current.DisplayName
+            };
+
+            TwitchTokenStore.Save(updated);
+            return updated;
+        }
+        catch (OperationCanceledException) { throw; }
+        catch (Exception ex)
+        {
+            Config.Logger.Log("[ERROR]", $"Twitch token refresh threw: {ex.Message}");
             return null;
         }
-
-        var tokenData = await response.Content.ReadFromJsonAsync<TokenSuccessResponse>(cancellationToken: cancellationToken);
-        if (tokenData is null) return null;
-
-        var updated = new TwitchTokenData
-        {
-            AccessToken = tokenData.AccessToken,
-            RefreshToken = tokenData.RefreshToken,
-            ExpiresAt = DateTime.UtcNow.AddSeconds(tokenData.ExpiresIn),
-            UserId = current.UserId,
-            Login = current.Login,
-            DisplayName = current.DisplayName
-        };
-
-        TwitchTokenStore.Save(updated);
-        return updated;
     }
 
-    // ------------------------------------------------------------
-    // Raw response shapes, just for deserialising Twitch's JSON.
-    // Nothing outside this file should ever need to see these directly.
-    // ------------------------------------------------------------
+    // Raw Twitch JSON shapes, only used for deserialising within this file.
     private class DeviceCodeResponse
     {
         [JsonPropertyName("device_code")] public string DeviceCode { get; set; } = "";

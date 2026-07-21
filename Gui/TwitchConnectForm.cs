@@ -4,16 +4,9 @@ using AdBreakTimerGUI.Twitch;
 
 namespace AdBreakTimerGUI.Gui;
 
-// A small modal that runs the actual Twitch device code flow and shows
-// its progress. Approving it happens in a browser, not in this app,
-// so this window's job is just: ask Twitch for a code, show it to me,
-// open the browser automatically, then sit and wait until Twitch
-// confirms I've approved it, or I give up and cancel.
+// Runs the device code flow and shows its progress. Approving happens in a browser, not here, so this window's job is: ask for a code, show it, open the browser, then wait for Twitch to confirm.
 public class TwitchConnectForm : Form
 {
-    // Set once the flow succeeds, null otherwise. MainForm checks this
-    // after ShowDialog returns to know whether to update to a
-    // connected state.
     public TwitchTokenData? Result { get; private set; }
 
     private readonly CancellationTokenSource _cts = new();
@@ -29,10 +22,7 @@ public class TwitchConnectForm : Form
     public TwitchConnectForm()
     {
         BuildUi();
-        // Kicking the actual network flow off after the window's
-        // already showing, not before, so there's something on screen
-        // the instant this opens rather than a blank window while the
-        // first request is in flight.
+        // Kicked off after Shown, not before, so there's something on screen the instant this opens rather than a blank window mid-request.
         Shown += (_, _) => _ = RunConnectFlowAsync();
     }
 
@@ -46,50 +36,21 @@ public class TwitchConnectForm : Form
         StartPosition = FormStartPosition.CenterParent;
         Font = new Font("Segoe UI", 9F);
 
-        _lblStatus = new Label
-        {
-            Location = new Point(16, 16),
-            Size = new Size(328, 40),
-            Text = "Requesting a code from Twitch..."
-        };
+        _lblStatus = new Label { Location = new Point(16, 16), Size = new Size(328, 40), Text = "Requesting a code from Twitch..." };
         Controls.Add(_lblStatus);
 
-        _lblCode = new Label
-        {
-            Location = new Point(16, 60),
-            Size = new Size(328, 44),
-            Font = new Font("Consolas", 20F, FontStyle.Bold),
-            TextAlign = ContentAlignment.MiddleCenter,
-            Visible = false
-        };
+        _lblCode = new Label { Location = new Point(16, 60), Size = new Size(328, 44), Font = new Font("Consolas", 20F, FontStyle.Bold), TextAlign = ContentAlignment.MiddleCenter, Visible = false };
         Controls.Add(_lblCode);
 
-        _btnOpenBrowser = new Button
-        {
-            Location = new Point(16, 112),
-            Size = new Size(328, 30),
-            Text = "Open twitch.tv/activate",
-            Visible = false
-        };
+        _btnOpenBrowser = new Button { Location = new Point(16, 112), Size = new Size(328, 30), Text = "Open twitch.tv/activate", Visible = false };
         _btnOpenBrowser.Click += (_, _) => OpenBrowser();
         Controls.Add(_btnOpenBrowser);
 
-        _btnCopyCode = new Button
-        {
-            Location = new Point(16, 150),
-            Size = new Size(328, 26),
-            Text = "Copy code",
-            Visible = false
-        };
+        _btnCopyCode = new Button { Location = new Point(16, 150), Size = new Size(328, 26), Text = "Copy code", Visible = false };
         _btnCopyCode.Click += (_, _) => Clipboard.SetText(_lblCode.Text);
         Controls.Add(_btnCopyCode);
 
-        _btnCancel = new Button
-        {
-            Location = new Point(16, 186),
-            Size = new Size(328, 30),
-            Text = "Cancel"
-        };
+        _btnCancel = new Button { Location = new Point(16, 186), Size = new Size(328, 30), Text = "Cancel" };
         _btnCancel.Click += (_, _) =>
         {
             _cts.Cancel();
@@ -102,15 +63,7 @@ public class TwitchConnectForm : Form
         CancelButton = _btnCancel;
     }
 
-    // Fired by TwitchAuthService.ConnectAsync the moment Twitch hands
-    // back a device code. I don't need an InvokeRequired check here
-    // the way Logger.ErrorLogged or WebServerHost.StatusChanged need
-    // one, those fire from a raw background Task with no UI thread
-    // context attached at all. This one's different: RunConnectFlowAsync
-    // started from the UI thread's Shown event, so every await inside
-    // ConnectAsync automatically resumes back on the UI thread via
-    // WinForms' own SynchronizationContext, and this callback runs
-    // between two of those awaits, already back on the right thread.
+    // Fired by ConnectAsync the moment Twitch hands back a device code. No InvokeRequired needed here, unlike Logger.ErrorLogged or WebServerHost.StatusChanged, RunConnectFlowAsync started on the UI thread, so every await inside ConnectAsync resumes back on it automatically via WinForms' SynchronizationContext.
     private void OnCodeReady(DeviceCodeInfo info)
     {
         _verificationUri = info.VerificationUri;
@@ -166,8 +119,7 @@ public class TwitchConnectForm : Form
         }
         catch (OperationCanceledException)
         {
-            // Cancelled deliberately, either the Cancel button or the
-            // window closing, nothing left to show.
+            // Cancelled deliberately, Cancel button or the window closing, nothing left to show.
         }
     }
 

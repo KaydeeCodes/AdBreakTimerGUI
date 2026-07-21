@@ -12,11 +12,13 @@ public class AdBreakBeganEventArgs : EventArgs
     public bool IsAutomatic { get; init; }
 }
 
+// Keeps a live WebSocket to Twitch's EventSub service, raises AdBreakBegan on channel.ad_break.begin. Owns its own reconnect logic, drops are normal for any long lived WebSocket.
 public class TwitchEventSubClient
 {
     private static readonly string DefaultUrl = TwitchConstants.EventSubWebSocketUrl;
     private static readonly HttpClient Http = new();
 
+    // Supplies a fresh, valid token on demand rather than a fixed string, since the connection can outlive one token's lifetime.
     private readonly Func<Task<TwitchTokenData?>> _getToken;
 
     public event EventHandler<AdBreakBeganEventArgs>? AdBreakBegan;
@@ -56,6 +58,7 @@ public class TwitchEventSubClient
             try
             {
                 string? nextUrl = await RunOneConnectionAsync(url, token);
+                // A graceful reconnect_url keeps the existing subscription, anything else is a genuine drop and needs a fresh session that resubscribes.
                 url = nextUrl ?? DefaultUrl;
             }
             catch (OperationCanceledException)
@@ -100,7 +103,19 @@ public class TwitchEventSubClient
             if (result.MessageType == WebSocketMessageType.Close) break;
 
             string json = Encoding.UTF8.GetString(messageStream.ToArray());
-            reconnectUrl = await HandleMessageAsync(json, isFreshSession);
+
+            try
+            {
+                reconnectUrl = await HandleMessageAsync(json, isFreshSession);
+            }
+            catch (OperationCanceledException) { throw; }
+            catch (Exception ex)
+            {
+                // A malformed or unexpected message shouldn't kill the whole connection, that used to force a full reconnect and resubscribe over a single bad message. Log it and keep reading.
+                Logger.Log("[ERROR]", $"Failed to handle EventSub message: {ex.Message}");
+                continue;
+            }
+
             if (reconnectUrl != null) break;
         }
 
@@ -130,11 +145,7 @@ public class TwitchEventSubClient
                 }
 
             case "session_keepalive":
-                // Deliberately not logging every keepalive, Twitch
-                // sends these every few seconds just to confirm the
-                // connection's alive, logging each one would drown out
-                // everything actually worth reading in the file.
-                return null;
+                return null; // just a heartbeat, not worth logging every one
 
             case "session_reconnect":
                 {
@@ -157,11 +168,6 @@ public class TwitchEventSubClient
             case "notification":
                 {
                     string subscriptionType = doc.RootElement.GetProperty("metadata").GetProperty("subscription_type").GetString() ?? "";
-                    // Logging every notification that arrives, not
-                    // just ones I recognise, this is the actual
-                    // confirmation that Twitch's message reached the
-                    // app at all, before any of my own filtering or
-                    // parsing gets a chance to go wrong.
                     Logger.Log("[TWITCH]", $"EventSub notification received: {subscriptionType}");
 
                     if (subscriptionType == "channel.ad_break.begin")
@@ -197,28 +203,35 @@ public class TwitchEventSubClient
             return;
         }
 
-        var body = new
+        try
         {
-            type = "channel.ad_break.begin",
-            version = "1",
-            condition = new { broadcaster_user_id = token.UserId },
-            transport = new { method = "websocket", session_id = sessionId }
-        };
+            var body = new
+            {
+                type = "channel.ad_break.begin",
+                version = "1",
+                condition = new { broadcaster_user_id = token.UserId },
+                transport = new { method = "websocket", session_id = sessionId }
+            };
 
-        using var request = new HttpRequestMessage(HttpMethod.Post, TwitchConstants.EventSubSubscriptionUrl);
-        request.Headers.Add("Authorization", $"Bearer {token.AccessToken}");
-        request.Headers.Add("Client-Id", TwitchConstants.ClientId);
-        request.Content = JsonContent.Create(body);
+            using var request = new HttpRequestMessage(HttpMethod.Post, TwitchConstants.EventSubSubscriptionUrl);
+            request.Headers.Add("Authorization", $"Bearer {token.AccessToken}");
+            request.Headers.Add("Client-Id", TwitchConstants.ClientId);
+            request.Content = JsonContent.Create(body);
 
-        var response = await Http.SendAsync(request);
-        if (response.IsSuccessStatusCode)
-        {
-            Logger.Log("[TWITCH]", $"Subscribed to channel.ad_break.begin for broadcaster {token.UserId}.");
+            var response = await Http.SendAsync(request);
+            if (response.IsSuccessStatusCode)
+            {
+                Logger.Log("[TWITCH]", $"Subscribed to channel.ad_break.begin for broadcaster {token.UserId}.");
+            }
+            else
+            {
+                string responseBody = await response.Content.ReadAsStringAsync();
+                Logger.Log("[ERROR]", $"Failed to subscribe to ad breaks: {(int)response.StatusCode} {responseBody}");
+            }
         }
-        else
+        catch (Exception ex)
         {
-            string responseBody = await response.Content.ReadAsStringAsync();
-            Logger.Log("[ERROR]", $"Failed to subscribe to ad breaks: {(int)response.StatusCode} {responseBody}");
+            Logger.Log("[ERROR]", $"Subscribing to ad breaks threw: {ex.Message}");
         }
     }
 }

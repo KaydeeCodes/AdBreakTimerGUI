@@ -12,16 +12,10 @@ public class AdScheduleData
     public int SnoozeCount { get; init; }
 }
 
-// Polls Twitch's Get Ad Schedule endpoint, the same data source the
-// creator dashboard's "Ad starts in..." timer is built from. This is
-// deliberately separate from TwitchEventSubClient, not a replacement
-// for it. channel.ad_break.begin is still what actually triggers the
-// red countdown, instantly, the moment a real ad starts, that part
-// doesn't change. This poller's only job is keeping the green
-// countdown's target honest against snoozes and Twitch's own dynamic
-// pacing, things the original fixed maths had no way to notice.
+// Polls Twitch's Get Ad Schedule endpoint, same data the dashboard's countdown uses. Doesn't replace TwitchEventSubClient, that's still the instant red-bar trigger, this only keeps the green countdown's target honest.
 public class TwitchAdSchedulePoller
 {
+    private const int PollIntervalSeconds = 30;
     private static readonly HttpClient Http = new();
     private readonly Func<Task<TwitchTokenData?>> _getToken;
 
@@ -29,6 +23,10 @@ public class TwitchAdSchedulePoller
 
     private CancellationTokenSource? _cts;
     private Task? _loopTask;
+
+    // Shared between the background loop and on-demand polls, so an immediate poll pushes the next scheduled one back rather than firing again a few seconds later.
+    private readonly object _scheduleLock = new();
+    private DateTime _nextScheduledPollUtc = DateTime.MinValue;
 
     public TwitchAdSchedulePoller(Func<Task<TwitchTokenData?>> getToken)
     {
@@ -40,6 +38,7 @@ public class TwitchAdSchedulePoller
         if (_loopTask is { IsCompleted: false }) return;
         Logger.Log("[TWITCH]", "Ad schedule poller starting.");
         _cts = new CancellationTokenSource();
+        lock (_scheduleLock) { _nextScheduledPollUtc = DateTime.UtcNow; } // poll immediately on start
         _loopTask = Task.Run(() => RunAsync(_cts.Token));
     }
 
@@ -54,37 +53,37 @@ public class TwitchAdSchedulePoller
     {
         while (!token.IsCancellationRequested)
         {
-            await FetchAndPublishAsync(token);
+            DateTime nextPoll;
+            lock (_scheduleLock) { nextPoll = _nextScheduledPollUtc; }
 
-            try { await Task.Delay(TimeSpan.FromSeconds(30), token); }
-            catch (OperationCanceledException) { break; }
+            TimeSpan wait = nextPoll - DateTime.UtcNow;
+            if (wait > TimeSpan.Zero)
+            {
+                try { await Task.Delay(wait, token); }
+                catch (OperationCanceledException) { break; }
+            }
+
+            await FetchAndPublishAsync(token);
         }
         Logger.Log("[TWITCH]", "Ad schedule poller stopped.");
     }
 
-    // Called on demand, from TwitchAdSequencer, the moment the
-    // ad-free phase actually starts. This is what lets the green
-    // countdown show the real target from its very first frame
-    // instead of a local guess that then visibly jumps once the next
-    // scheduled 30 second poll corrects it. Genuinely optional, the
-    // caller passes its own short timeout, and just falls back to the
-    // old guess-then-correct behaviour if this doesn't come back in
-    // time.
-    public async Task<AdScheduleData?> PollNowAsync(CancellationToken token) => await FetchAndPublishAsync(token);
+    // Called on demand by TwitchAdSequencer the instant the ad-free phase starts, so the green bar shows the real target from its first frame instead of a local guess corrected later.
+    public Task<AdScheduleData?> PollNowAsync(CancellationToken token) => FetchAndPublishAsync(token);
 
-    // The one real fetch, used by both the background loop and the
-    // on-demand call above, so there's only one place actually talking
-    // to Twitch's API and only one place parsing the response.
     private async Task<AdScheduleData?> FetchAndPublishAsync(CancellationToken token)
     {
+        // Pushed forward on every fetch, on-demand or scheduled, so the two paths never land back to back.
+        lock (_scheduleLock) { _nextScheduledPollUtc = DateTime.UtcNow.AddSeconds(PollIntervalSeconds); }
+
         try
         {
-            TwitchTokenData? token2 = await _getToken();
-            if (token2 is null) return null;
+            TwitchTokenData? twitchToken = await _getToken();
+            if (twitchToken is null) return null;
 
             using var request = new HttpRequestMessage(HttpMethod.Get,
-                $"https://api.twitch.tv/helix/channels/ads?broadcaster_id={token2.UserId}");
-            request.Headers.Add("Authorization", $"Bearer {token2.AccessToken}");
+                $"https://api.twitch.tv/helix/channels/ads?broadcaster_id={twitchToken.UserId}");
+            request.Headers.Add("Authorization", $"Bearer {twitchToken.AccessToken}");
             request.Headers.Add("Client-Id", TwitchConstants.ClientId);
 
             var response = await Http.SendAsync(request, token);
@@ -98,11 +97,7 @@ public class TwitchAdSchedulePoller
             using JsonDocument doc = await JsonDocument.ParseAsync(stream, cancellationToken: token);
 
             if (!doc.RootElement.TryGetProperty("data", out var dataArray) || dataArray.GetArrayLength() == 0)
-            {
-                // Perfectly normal when the channel's offline, not an
-                // error, just nothing to correct against right now.
-                return null;
-            }
+                return null; // channel offline or nothing scheduled, not an error
 
             JsonElement entry = dataArray[0];
             var data = new AdScheduleData
@@ -120,10 +115,7 @@ public class TwitchAdSchedulePoller
         }
         catch (OperationCanceledException)
         {
-            // Either the app's shutting down, or (for PollNowAsync
-            // specifically) the caller's short timeout ran out. Either
-            // way, not a real error, just no fresh data in time.
-            return null;
+            return null; // app shutting down, or an on-demand poll's short timeout ran out
         }
         catch (Exception ex)
         {
@@ -132,14 +124,10 @@ public class TwitchAdSchedulePoller
         }
     }
 
-    // Twitch's documentation shows this as a quoted RFC3339 string,
-    // but real responses actually send a plain Unix timestamp number
-    // instead, confirmed by Twitch staff on their own developer forum
-    // as a known documentation inconsistency they don't plan to fix.
+    // Twitch's docs show this as a quoted RFC3339 string, real responses send a plain Unix number instead, confirmed by Twitch staff as a doc/reality mismatch they won't fix.
     private static DateTime? ReadFlexibleTimestamp(JsonElement obj, string propertyName)
     {
-        if (!obj.TryGetProperty(propertyName, out var prop))
-            return null;
+        if (!obj.TryGetProperty(propertyName, out var prop)) return null;
 
         if (prop.ValueKind == JsonValueKind.Number)
             return DateTimeOffset.FromUnixTimeSeconds(prop.GetInt64()).UtcDateTime;
@@ -148,10 +136,8 @@ public class TwitchAdSchedulePoller
         {
             string raw = prop.GetString() ?? "";
             if (string.IsNullOrWhiteSpace(raw)) return null;
-
             if (DateTimeOffset.TryParse(raw, CultureInfo.InvariantCulture, DateTimeStyles.AssumeUniversal, out var dto))
                 return dto.UtcDateTime;
-
             if (long.TryParse(raw, out long unixSeconds))
                 return DateTimeOffset.FromUnixTimeSeconds(unixSeconds).UtcDateTime;
         }

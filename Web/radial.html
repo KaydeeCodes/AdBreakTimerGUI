@@ -3,13 +3,8 @@
 <head>
     <meta charset="UTF-8">
     <title>Ad Break Radial</title>
-    <!--
-      Ad Break Timer, radial progress ring overlay.
-      Made by Kaydee.Codes (https://kaydee.codes/), free to use, no data collected, ever.
-    
-      Same polling model as the bar overlay: I ask /radial/api?cmd=status
-      five times a second and redraw from whatever comes back.
-    -->
+    <!-- Circular ring overlay. Made by Kaydee.Codes (https://kaydee.codes/), free to use, no data collected, ever. -->
+    <!-- Same polling model as the bar: /radial/api?cmd=status 5x/sec. -->
     <style>
         html, body {
             margin: 0;
@@ -47,6 +42,12 @@
     const API = "/radial/api";
     let lastState = null;
 
+    // Cached once rather than re-queried every render, this runs 5x/sec for as long as the overlay's open.
+    const svgEl = document.getElementById('svg');
+    const trackEl = document.getElementById('track');
+    const ringEl = document.getElementById('ring');
+
+    // Diameter as a % of whichever viewport side is smaller, recalculated every render so the ring actually resizes with the OBS source
     function computeDiameter(sizePercent) {
         const vmin = Math.min(window.innerWidth, window.innerHeight);
         return Math.max(20, vmin * (sizePercent / 100));
@@ -55,70 +56,51 @@
     function render(state) {
         lastState = state;
 
-        const svg = document.getElementById('svg');
-        const track = document.getElementById('track');
-        const ring = document.getElementById('ring');
-
         const diameter = computeDiameter(state.size);
         const thickness = Math.max(1, diameter * (state.thickness / 100));
         const radius = (diameter / 2) - (thickness / 2);
         const circumference = 2 * Math.PI * radius;
         const center = diameter / 2;
 
-        svg.setAttribute('width', diameter);
-        svg.setAttribute('height', diameter);
-        svg.setAttribute('viewBox', `0 0 ${diameter} ${diameter}`);
+        svgEl.setAttribute('width', diameter);
+        svgEl.setAttribute('height', diameter);
+        svgEl.setAttribute('viewBox', `0 0 ${diameter} ${diameter}`);
 
         document.body.style.background = state.bgColor === 'transparent' ? 'transparent' : state.bgColor;
 
-        for (const circle of [track, ring]) {
+        for (const circle of [trackEl, ringEl]) {
             circle.setAttribute('cx', center);
             circle.setAttribute('cy', center);
             circle.setAttribute('r', radius);
             circle.setAttribute('stroke-width', thickness);
         }
 
-        track.setAttribute('stroke', state.trackColor || 'rgba(255,255,255,0.15)');
-        ring.setAttribute('stroke-dasharray', circumference);
+        trackEl.setAttribute('stroke', state.trackColor || 'rgba(255,255,255,0.15)');
+        ringEl.setAttribute('stroke-dasharray', circumference);
 
         const initial = state.initialTime > 0 ? state.initialTime : 1;
         const elapsedPct = Math.min(1, Math.max(0, (initial - state.remaining) / initial));
 
         let drawnFraction;
         if (state.status === 'finished') {
-            drawnFraction = 1;
+            drawnFraction = 1; // fully drawn so the finish colour flash is visible
         } else if (state.status === 'idle') {
             drawnFraction = 0;
         } else {
             drawnFraction = 1 - elapsedPct;
         }
-        ring.setAttribute('stroke-dashoffset', circumference * (1 - drawnFraction));
+        ringEl.setAttribute('stroke-dashoffset', circumference * (1 - drawnFraction));
 
-        // Rotate so the ring starts at 12 o'clock instead of 3 o'clock,
-        // plus whatever extra rotation the streamer's chosen (0/90/180/270,
-        // via rotationDegrees), and mirror for anticlockwise.
-        //
-        // I swapped which direction gets the mirror from an earlier
-        // version of this. SVG draws a circle's stroke sweep clockwise by
-        // default (its y-axis points down, so a growing angle reads as
-        // clockwise on screen), so leaving 'cw' unmirrored looked like the
-        // obviously correct choice, but testing showed cw and ccw actually
-        // came out backwards from what they said. Rather than chase the
-        // exact cause through the browser's path winding rules, mirroring
-        // 'cw' instead of 'ccw' is the direct fix, and it now matches what
-        // the labels actually say on screen.
+        // Rotates to start at 12 o'clock plus rotationDegrees, mirror flips cw/ccw.
+        // Mirror is on 'cw' not 'ccw' here, SVG draws clockwise by default so that looked backwards until testing showed it needed swapping, see project notes for why.
         const mirror = state.direction === 'cw' ? 'scale(-1,1)' : '';
         const rotationOffset = Number(state.rotationDegrees) || 0;
-        ring.setAttribute('transform', `translate(${center},${center}) rotate(${-90 + rotationOffset}) ${mirror} translate(${-center},${-center})`);
+        ringEl.setAttribute('transform', `translate(${center},${center}) rotate(${-90 + rotationOffset}) ${mirror} translate(${-center},${-center})`);
 
         const color = state.status === 'finished' ? state.finishColor : state.color;
-        ring.setAttribute('stroke', color);
+        ringEl.setAttribute('stroke', color);
 
-        if (state.status === 'finished' && state.flashOnFinish) {
-            ring.classList.add('pulse');
-        } else {
-            ring.classList.remove('pulse');
-        }
+        ringEl.classList.toggle('pulse', state.status === 'finished' && state.flashOnFinish);
     }
 
     window.addEventListener('resize', () => {
@@ -131,8 +113,7 @@
             const data = await res.json();
             if (data.ok) render(data.state);
         } catch (e) {
-            // Server's probably not up yet, or got restarted. Just retry
-            // on the next tick instead of throwing an error into the console.
+            // Server's probably not up yet or restarted, just retry next tick
         }
         setTimeout(poll, 200);
     }

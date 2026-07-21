@@ -5,28 +5,26 @@ using AdBreakTimerGUI.Config;
 
 namespace AdBreakTimerGUI.Twitch;
 
-// Saves and loads the Twitch token to disk, encrypted with Windows
-// DPAPI so it's not sitting around as plain text. DPAPI ties the
-// encryption to my actual Windows user account, only the same person
-// logged into the same machine can decrypt it back. I picked this over
-// something like a fixed encryption key baked into the app, which
-// wouldn't actually protect anything, anyone could pull the key back
-// out by decompiling the exe.
+// Saves/loads the Twitch token encrypted with Windows DPAPI, tied to my Windows account, not a fixed key baked into the exe that anyone could pull back out.
 public static class TwitchTokenStore
 {
     private static readonly string TokenFile = Path.Combine(Paths.ConfigDir, "twitch.token");
 
+    // Was unguarded before, unlike Load, a failed write here used to throw straight up into the auth flow.
     public static void Save(TwitchTokenData token)
     {
-        Paths.EnsureConfigDirExists();
-        string json = JsonSerializer.Serialize(token);
-        byte[] plainBytes = Encoding.UTF8.GetBytes(json);
-
-        // CurrentUser rather than LocalMachine, this ties it to my
-        // specific Windows account rather than anyone who can log into
-        // this machine at all.
-        byte[] encrypted = ProtectedData.Protect(plainBytes, null, DataProtectionScope.CurrentUser);
-        File.WriteAllBytes(TokenFile, encrypted);
+        try
+        {
+            Paths.EnsureConfigDirExists();
+            string json = JsonSerializer.Serialize(token);
+            byte[] plainBytes = Encoding.UTF8.GetBytes(json);
+            byte[] encrypted = ProtectedData.Protect(plainBytes, null, DataProtectionScope.CurrentUser);
+            File.WriteAllBytes(TokenFile, encrypted);
+        }
+        catch (Exception ex)
+        {
+            Logger.Log("[ERROR]", $"Failed to save Twitch token: {ex.Message}");
+        }
     }
 
     public static TwitchTokenData? Load()
@@ -39,20 +37,24 @@ public static class TwitchTokenStore
             string json = Encoding.UTF8.GetString(plainBytes);
             return JsonSerializer.Deserialize<TwitchTokenData>(json);
         }
-        catch
+        catch (Exception ex)
         {
-            // Corrupt file, or encrypted under a different Windows
-            // account than the one running now (DPAPI fails to
-            // unprotect in that case), either way I can't use it, so I
-            // treat it the same as "never connected" rather than
-            // crashing over it.
+            // Corrupt file, or encrypted under a different Windows account (DPAPI fails to unprotect), either way treated as "never connected".
+            Logger.Log("[ERROR]", $"Failed to load Twitch token: {ex.Message}");
             return null;
         }
     }
 
     public static void Delete()
     {
-        if (File.Exists(TokenFile)) File.Delete(TokenFile);
+        try
+        {
+            if (File.Exists(TokenFile)) File.Delete(TokenFile);
+        }
+        catch (Exception ex)
+        {
+            Logger.Log("[ERROR]", $"Failed to delete Twitch token: {ex.Message}");
+        }
     }
 
     public static bool HasSavedToken => File.Exists(TokenFile);
