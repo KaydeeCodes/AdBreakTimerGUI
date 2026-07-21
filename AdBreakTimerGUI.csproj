@@ -45,6 +45,7 @@
         <Folder Include="Assets\" />
         <EmbeddedResource Include="Web\bar.html" />
         <EmbeddedResource Include="Web\radial.html" />
+        <EmbeddedResource Include="Assets\app.ico" />
         <Folder Include="docs\screenshots\" />
     </ItemGroup>
 

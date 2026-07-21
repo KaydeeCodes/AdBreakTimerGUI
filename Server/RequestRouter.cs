@@ -52,8 +52,15 @@ public static class RequestRouter
                 return;
             }
 
-            // Worth logging, a wrong path usually means a typo'd OBS Browser Source URL, this is the fastest way to spot that.
-            Logger.Log("[ERROR]", $"404 Not Found: {path}");
+            // Browsers request this automatically on every page load, serving it properly means that harmless request stops 404ing (and wrongly flipping the traffic light amber for it), rather than treating a normal browser behaviour as an application error.
+            if (path.Equals("/favicon.ico", StringComparison.OrdinalIgnoreCase))
+            {
+                await SendFavicon(res);
+                return;
+            }
+
+            // Logged, but not as [ERROR], a wrong path can still mean a typo'd OBS Browser Source URL worth spotting, but a plain 404 isn't itself an application fault, it shouldn't flip the traffic light amber the way a genuine error should.
+            Logger.Log("[HTTP]", $"404 Not Found: {path}");
             await SendText(res, 404, "text/plain", $"404 Not Found: {path}");
         }
         catch (Exception ex)
@@ -88,6 +95,26 @@ public static class RequestRouter
         using var reader = new StreamReader(stream);
         string html = await reader.ReadToEndAsync();
         await SendText(res, 200, "text/html; charset=utf-8", html);
+    }
+
+    // Same app icon already embedded for ApplicationIcon in the csproj, read back out and served raw rather than keeping a second copy anywhere.
+    private static async Task SendFavicon(HttpListenerResponse res)
+    {
+        Assembly asm = Assembly.GetExecutingAssembly();
+        await using Stream? stream = asm.GetManifestResourceStream("AdBreakTimerGUI.Assets.app.ico");
+        if (stream == null)
+        {
+            // Not worth failing loudly over, a missing favicon is genuinely harmless, this just means the exe was built without the icon embedded for some reason.
+            res.StatusCode = 404;
+            res.Close();
+            return;
+        }
+
+        res.StatusCode = 200;
+        res.ContentType = "image/x-icon";
+        res.ContentLength64 = stream.Length;
+        await stream.CopyToAsync(res.OutputStream);
+        res.Close();
     }
 
     private static string IndexHtml() => """
