@@ -3,7 +3,7 @@
 public static class TwitchConstants
 {
     public const string ClientId = "vjpoiglyr5t7chhrtzyhld1hxsnhb3";
-    public const string Scopes = "channel:read:ads";
+    public const string Scopes = "channel:read:ads channel:manage:ads";
 
     // Real Twitch endpoints by default. For local testing against the
     // Twitch CLI's mock EventSub server, temporarily swap these two to

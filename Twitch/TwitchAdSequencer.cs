@@ -13,20 +13,27 @@ public class TwitchAdSequencer
     private const string AdFreeColor = "#00ff00";
     private const int MinimumAdFreeSeconds = 5;
 
+    // How long I'm willing to wait for an immediate poll before giving
+    // up and falling back to the local guess. Short on purpose, this
+    // is meant to feel instant, not to make the green bar visibly
+    // hesitate before appearing.
+    private static readonly TimeSpan ImmediatePollTimeout = TimeSpan.FromSeconds(5);
+
+    private const double AdjustThresholdSeconds = 5;
+
+    private enum Phase { Idle, Ad, AdFree }
+    private volatile Phase _phase = Phase.Idle;
+
+    private readonly object _targetLock = new();
+    private DateTime _adFreeTargetUtc;
+
     private readonly Func<AppSettings> _getSettings;
     private readonly Func<AdSequencerTarget> _getTarget;
+    private TwitchAdSchedulePoller? _schedulePoller;
 
     private CancellationTokenSource? _cycleCts;
     private readonly object _lock = new();
 
-    // When the most recent real ad break actually started, and my
-    // best estimate of when the next one will, based on the
-    // configured cycle length. Both null until the very first ad
-    // break comes through, there's nothing genuine to show before
-    // that. NextAdEstimatedUtc specifically is only set once the
-    // ad-free countdown actually begins, not the moment the ad break
-    // starts, since the true "next ad" estimate depends on knowing
-    // this ad's real duration first.
     public DateTime? LastAdStartedUtc { get; private set; }
     public DateTime? NextAdEstimatedUtc { get; private set; }
 
@@ -38,6 +45,17 @@ public class TwitchAdSequencer
 
     public void Attach(TwitchEventSubClient client) => client.AdBreakBegan += (_, e) => OnAdBreakBegan(e.DurationSeconds);
 
+    // Keeping a reference to the poller now, not just subscribing to
+    // its event, so RunCycleAsync can ask it for one immediate reading
+    // the moment the ad-free phase starts, rather than only ever
+    // reacting passively to whatever the background loop happens to
+    // publish next.
+    public void AttachSchedulePoller(TwitchAdSchedulePoller poller)
+    {
+        _schedulePoller = poller;
+        poller.ScheduleUpdated += (_, data) => AdjustAdFreeTarget(data.NextAdAtUtc);
+    }
+
     public void Stop()
     {
         lock (_lock)
@@ -47,10 +65,7 @@ public class TwitchAdSequencer
             _cycleCts?.Cancel();
             _cycleCts = null;
         }
-        // Deliberately not clearing LastAdStartedUtc/NextAdEstimatedUtc
-        // here. Even once stopped, "when did the last ad actually
-        // happen" is still true and still worth showing, it just isn't
-        // being actively tracked toward a new one any more.
+        _phase = Phase.Idle;
     }
 
     private void OnAdBreakBegan(int durationSeconds)
@@ -64,9 +79,6 @@ public class TwitchAdSequencer
         Logger.Log("[TWITCH]", $"Sequencer received the event, starting a red countdown for {durationSeconds}s.");
 
         LastAdStartedUtc = DateTime.UtcNow;
-        // Cleared until the ad-free phase actually starts and works
-        // out a real estimate, rather than showing a stale number left
-        // over from the previous cycle while this one's still running.
         NextAdEstimatedUtc = null;
 
         var newCts = new CancellationTokenSource();
@@ -79,6 +91,31 @@ public class TwitchAdSequencer
         _ = RunCycleAsync(durationSeconds, newCts.Token);
     }
 
+    // Called whenever the background poller publishes a fresh answer.
+    // Only actually does anything while the ad-free phase is running,
+    // reacting during the red countdown wouldn't mean anything, the
+    // real ad event owns that entirely.
+    private void AdjustAdFreeTarget(DateTime? nextAdAtUtc)
+    {
+        if (_phase != Phase.AdFree) return;
+        if (nextAdAtUtc is null) return;
+
+        DateTime newTarget = nextAdAtUtc.Value;
+        DateTime oldTarget;
+        lock (_targetLock) { oldTarget = _adFreeTargetUtc; }
+
+        double diffSeconds = Math.Abs((newTarget - oldTarget).TotalSeconds);
+        if (diffSeconds < AdjustThresholdSeconds) return;
+
+        lock (_targetLock) { _adFreeTargetUtc = newTarget; }
+        NextAdEstimatedUtc = newTarget;
+
+        int remainingSeconds = Math.Max(MinimumAdFreeSeconds, (int)(newTarget - DateTime.UtcNow).TotalSeconds);
+        Logger.Log("[TWITCH]", $"Ad schedule poll adjusted the ad-free countdown by {diffSeconds:F0}s, now targeting {newTarget.ToLocalTime():HH:mm:ss} ({remainingSeconds}s remaining).");
+
+        FireGo(_getTarget(), remainingSeconds, AdFreeColor);
+    }
+
     private async Task RunCycleAsync(int adDurationSeconds, CancellationToken token)
     {
         try
@@ -86,6 +123,7 @@ public class TwitchAdSequencer
             AppSettings settings = _getSettings();
             AdSequencerTarget target = _getTarget();
 
+            _phase = Phase.Ad;
             FireGo(target, adDurationSeconds, AdColor);
             await Task.Delay(TimeSpan.FromSeconds(adDurationSeconds), token);
 
@@ -95,31 +133,80 @@ public class TwitchAdSequencer
                 await Task.Delay(TimeSpan.FromSeconds(settings.AdBufferSeconds), token);
             }
 
-            int rawAdFreeSeconds = settings.AdFreeSeconds - adDurationSeconds - settings.AdBufferSeconds;
-            int adFreeSeconds = Math.Max(MinimumAdFreeSeconds, rawAdFreeSeconds);
+            // Try to get the real answer immediately, before showing
+            // anything, rather than guessing and correcting later.
+            // This is the fix for the visible "shows 43 minutes, then
+            // jumps to 53" jarring correction, if this succeeds, the
+            // green bar's very first frame is already the true value.
+            AdScheduleData? fresh = null;
+            if (_schedulePoller != null)
+            {
+                try
+                {
+                    using var timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(token);
+                    timeoutCts.CancelAfter(ImmediatePollTimeout);
+                    fresh = await _schedulePoller.PollNowAsync(timeoutCts.Token);
+                }
+                catch (OperationCanceledException) when (!token.IsCancellationRequested)
+                {
+                    // Just the 5 second timeout expiring, not the cycle
+                    // itself being cancelled, fall through to the local
+                    // estimate below same as if this poll never happened.
+                }
+            }
 
-            if (rawAdFreeSeconds < MinimumAdFreeSeconds)
-                Logger.Log("[ERROR]", $"Configured cycle length ({settings.AdFreeSeconds}s) is too short for a {adDurationSeconds}s ad plus a {settings.AdBufferSeconds}s buffer, flooring the ad-free countdown to {MinimumAdFreeSeconds}s instead of {rawAdFreeSeconds}s.");
+            DateTime targetUtc;
+            int adFreeSeconds;
 
-            // This is my best estimate of when the next ad will start,
-            // worked out now, right as the ad-free countdown itself
-            // begins, so it's based on the real remaining time rather
-            // than a number calculated back when the ad break started.
-            NextAdEstimatedUtc = DateTime.UtcNow.AddSeconds(adFreeSeconds);
+            if (fresh?.NextAdAtUtc is { } freshNext && freshNext > DateTime.UtcNow)
+            {
+                targetUtc = freshNext;
+                adFreeSeconds = Math.Max(MinimumAdFreeSeconds, (int)(targetUtc - DateTime.UtcNow).TotalSeconds);
+                Logger.Log("[TWITCH]", $"Got a fresh schedule reading immediately, starting ad-free countdown for {adFreeSeconds}s targeting {targetUtc.ToLocalTime():HH:mm:ss}, no guess needed.");
+            }
+            else
+            {
+                int rawAdFreeSeconds = settings.AdFreeSeconds - adDurationSeconds - settings.AdBufferSeconds;
+                adFreeSeconds = Math.Max(MinimumAdFreeSeconds, rawAdFreeSeconds);
 
-            Logger.Log("[TWITCH]", $"Starting ad-free countdown for {adFreeSeconds}s (cycle {settings.AdFreeSeconds}s minus {adDurationSeconds}s ad minus {settings.AdBufferSeconds}s buffer).");
+                if (rawAdFreeSeconds < MinimumAdFreeSeconds)
+                    Logger.Log("[ERROR]", $"Configured cycle length ({settings.AdFreeSeconds}s) is too short for a {adDurationSeconds}s ad plus a {settings.AdBufferSeconds}s buffer, flooring the ad-free countdown to {MinimumAdFreeSeconds}s instead of {rawAdFreeSeconds}s.");
+
+                targetUtc = DateTime.UtcNow.AddSeconds(adFreeSeconds);
+                Logger.Log("[TWITCH]", $"Starting ad-free countdown for {adFreeSeconds}s (cycle {settings.AdFreeSeconds}s minus {adDurationSeconds}s ad minus {settings.AdBufferSeconds}s buffer), no fresh schedule reading available yet, the background poller will correct this within 30s if needed.");
+            }
+
+            lock (_targetLock) { _adFreeTargetUtc = targetUtc; }
+            NextAdEstimatedUtc = targetUtc;
+            _phase = Phase.AdFree;
+
             FireGo(target, adFreeSeconds, AdFreeColor);
-            await Task.Delay(TimeSpan.FromSeconds(adFreeSeconds), token);
 
+            while (true)
+            {
+                DateTime currentTarget;
+                lock (_targetLock) { currentTarget = _adFreeTargetUtc; }
+
+                TimeSpan remaining = currentTarget - DateTime.UtcNow;
+                if (remaining <= TimeSpan.Zero) break;
+
+                double stepMs = Math.Max(50, Math.Min(1000, remaining.TotalMilliseconds));
+                await Task.Delay(TimeSpan.FromMilliseconds(stepMs), token);
+            }
+
+            _phase = Phase.Idle;
+            NextAdEstimatedUtc = null;
             Logger.Log("[TWITCH]", "Ad-free countdown finished with no new ad break, clearing overlay to idle.");
             FireStop(target);
         }
         catch (OperationCanceledException)
         {
+            _phase = Phase.Idle;
             Logger.Log("[TWITCH]", "Cycle interrupted (a new ad break arrived, or the sequencer was stopped).");
         }
         catch (Exception ex)
         {
+            _phase = Phase.Idle;
             Logger.Log("[ERROR]", $"Ad sequencer cycle crashed unexpectedly: {ex}");
         }
     }
