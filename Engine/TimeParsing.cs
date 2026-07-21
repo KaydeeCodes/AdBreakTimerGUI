@@ -1,11 +1,9 @@
 ﻿namespace AdBreakTimerGUI.Engine;
 
-// Reading a time value in (from Streamer.bot, a text box, wherever) and
-// turning it back into a readable string for display.
+// Reading a time value in and back out again.
 public static class TimeParsing
 {
-    // I accept hh:mm:ss, mm:ss, or a plain number of seconds, since
-    // that covers everything Streamer.bot and I both actually type.
+    // Accepts hh:mm:ss, mm:ss, or a plain number of seconds.
     public static int HmsToSecs(string value)
     {
         value = value.Trim();
@@ -17,20 +15,14 @@ public static class TimeParsing
         return int.TryParse(value, out int seconds) ? Math.Abs(seconds) : 0;
     }
 
-    // The other direction, turning a whole number of seconds back into
-    // hh:mm:ss for logging or display.
+    // Back to hh:mm:ss for logging and display.
     public static string SecsToHms(int totalSeconds)
     {
         totalSeconds = Math.Max(0, totalSeconds);
         return $"{totalSeconds / 3600:D2}:{totalSeconds % 3600 / 60:D2}:{totalSeconds % 60:D2}";
     }
 
-    // Returns false with a readable error instead of throwing. I route
-    // every time value through this now, whether it's from a text box
-    // or an API query string, rather than calling HmsToSecs directly.
-    // HmsToSecs itself can throw on genuinely bad input, int.Parse
-    // isn't forgiving, so this is what keeps a malformed value from
-    // escaping all the way up as an unhandled exception.
+    // Same as HmsToSecs but never throws, for text boxes and API input rather than trusted internal calls.
     public static bool TryParseDuration(string value, out int seconds, out string? error)
     {
         error = null;
@@ -42,11 +34,6 @@ public static class TimeParsing
         }
         catch
         {
-            // Catching everything here, not just FormatException. A
-            // huge number of digits throws OverflowException instead,
-            // and either way the input just wasn't something I can
-            // use, so the caller gets the same readable error regardless
-            // of which one it was.
             error = "Couldn't read that as mm:ss, hh:mm:ss, or a number of seconds.";
             return false;
         }

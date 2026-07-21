@@ -44,8 +44,6 @@ public partial class MainForm : Form
     private TwitchAdSequencer? _adSequencer;
     private ComboBox _cmbAutoDetectTarget = null!;
 
-    // The live "last ad / next ad" readout on the Twitch tab, and the
-    // timer that keeps it ticking once a second.
     private Label _lblLastAd = null!;
     private Label _lblNextAd = null!;
     private System.Windows.Forms.Timer _adCycleDisplayTimer = null!;
@@ -181,7 +179,7 @@ public partial class MainForm : Form
             ForeColor = Color.Gray,
             Text = "Made by Kaydee.Codes - Free to use, no data collected, ever."
         };
-        lblFooter.LinkArea = new LinkArea(8, 12);
+        lblFooter.LinkArea = new LinkArea(8, 12); // just the "Kaydee.Codes" part is clickable
         lblFooter.LinkClicked += (_, _) => Process.Start(new ProcessStartInfo("https://kaydee.codes/") { UseShellExecute = true });
         Controls.Add(lblFooter);
         y += 26;
@@ -252,7 +250,7 @@ public partial class MainForm : Form
             Size = new Size(360, 28),
             ForeColor = Color.Gray,
             Font = new Font("Segoe UI", 7.5F),
-            Text = "Same number as Twitch's Ads Manager (\"every X minutes\"), the full cycle including the ad itself, not just the gap. The sequencer subtracts the real ad length and buffer automatically."
+            Text = "Same number as Twitch's Ads Manager (\"every X minutes\"), full cycle including the ad itself, not just the gap. Only used as a fallback when Twitch's live schedule isn't available."
         };
         tab.Controls.Add(adFreeHint);
         y += 34;
@@ -300,6 +298,7 @@ public partial class MainForm : Form
         _btnTwitchConnect.Click += (_, _) => OnTwitchConnectClicked();
         tab.Controls.Add(_btnTwitchConnect);
 
+        // Same spot as Connect, only one visible at a time, toggled by UpdateTwitchTabUi.
         _btnTwitchDisconnect = new Button { Location = new Point(280, 12), Size = new Size(100, 26), Text = "Disconnect", Visible = false };
         _btnTwitchDisconnect.Click += (_, _) => OnTwitchDisconnectClicked();
         tab.Controls.Add(_btnTwitchDisconnect);
@@ -310,7 +309,7 @@ public partial class MainForm : Form
             AutoSize = true,
             Text = "Auto detect ads and run the overlay automatically",
             Checked = _settings.AutoDetectAds,
-            Enabled = false
+            Enabled = false // nothing for this to do without a connected account, UpdateTwitchTabUi flips it on
         };
         _chkAutoDetectAds.CheckedChanged += (_, _) =>
         {
@@ -360,6 +359,7 @@ public partial class MainForm : Form
     // ------------------------------------------------------------
     // Twitch connect / disconnect
     // ------------------------------------------------------------
+    // Runs once at startup, restores a saved connection without needing to reconnect every launch.
     private async Task LoadTwitchStateAsync()
     {
         TwitchTokenData? token = TwitchTokenStore.Load();
@@ -374,6 +374,7 @@ public partial class MainForm : Form
             TwitchTokenData? refreshed = await TwitchAuthService.RefreshAsync(token, CancellationToken.None);
             if (refreshed is null)
             {
+                // Refresh token's no good any more either (revoked, or long unused), forget it and ask to reconnect.
                 TwitchTokenStore.Delete();
                 UpdateTwitchTabUi(null);
                 return;
@@ -396,6 +397,7 @@ public partial class MainForm : Form
             _twitchToken = dlg.Result;
             UpdateTwitchTabUi(_twitchToken);
 
+            // Turns on automatically the moment an account connects, still just a checkbox afterward so it can go back to manual any time.
             _settings.AutoDetectAds = true;
             _chkAutoDetectAds.Checked = true;
             JsonStore.Save(_settings, Paths.SettingsFile);
@@ -422,6 +424,7 @@ public partial class MainForm : Form
         UpdateAutoDetectRunningState();
     }
 
+    // Refreshes the token first if it's close to expiring, passed to TwitchEventSubClient/TwitchAdSchedulePoller as a delegate so they always get whatever's current.
     private async Task<TwitchTokenData?> GetValidTwitchTokenAsync()
     {
         if (_twitchToken is null) return null;
@@ -432,18 +435,7 @@ public partial class MainForm : Form
         return refreshed;
     }
 
-    // The single place deciding whether the Twitch background pieces
-    // should actually be running: the web service has to be started,
-    // an account has to be connected, and Auto detect ads has to be
-    // ticked. Called any time one of those three things changes.
-    //
-    // Three separate pieces get started together here:
-    // TwitchEventSubClient (the instant red-bar trigger, unchanged
-    // from before), TwitchAdSchedulePoller (the new one, keeps the
-    // green countdown's target honest against snoozes and Twitch's
-    // own dynamic pacing), and TwitchAdSequencer itself, which both of
-    // the others feed into. The sequencer has to exist before either
-    // of the other two can Attach to it, so it's created first.
+    // The single place deciding whether the Twitch background pieces should be running: service started, account connected, auto detect ticked. Sequencer's created first since the other two Attach to it.
     private void UpdateAutoDetectRunningState()
     {
         bool shouldRun = _server.IsRunning && _twitchToken != null && _settings.AutoDetectAds;
@@ -485,6 +477,8 @@ public partial class MainForm : Form
             _ => AdSequencerTarget.Both
         });
 
+    // Reads TwitchAdSequencer's two timestamps into readable "X ago"/"in X" text once a second.
+    // These properties get written from background threads with no lock, technically a data race, but the only consequence is this label showing a one-tick-stale value before self-correcting a second later, purely cosmetic, not worth locking for.
     private void RefreshAdCycleDisplay()
     {
         if (_adSequencer is null)
@@ -724,10 +718,20 @@ public partial class MainForm : Form
             return;
         }
 
+        int newBufferSeconds = (int)_numAdBuffer.Value;
+
+        // Same "what actually changed" logging as OverlayCommandExecutor's appearance updates.
+        var changes = new List<string>();
+        if (_settings.AdBreakSeconds != adBreakSeconds) changes.Add($"adBreakSeconds {_settings.AdBreakSeconds}->{adBreakSeconds}");
+        if (_settings.AdFreeSeconds != adFreeSeconds) changes.Add($"adFreeSeconds {_settings.AdFreeSeconds}->{adFreeSeconds}");
+        if (_settings.AdBufferSeconds != newBufferSeconds) changes.Add($"adBufferSeconds {_settings.AdBufferSeconds}->{newBufferSeconds}");
+
         _settings.AdBreakSeconds = adBreakSeconds;
         _settings.AdFreeSeconds = adFreeSeconds;
-        _settings.AdBufferSeconds = (int)_numAdBuffer.Value;
+        _settings.AdBufferSeconds = newBufferSeconds;
         JsonStore.Save(_settings, Paths.SettingsFile);
+
+        Logger.Log("[SETTINGS]", changes.Count > 0 ? $"Timing updated: {string.Join(", ", changes)}" : "Timing settings saved, no actual changes.");
 
         RefreshLinkText();
 
@@ -783,6 +787,7 @@ public partial class MainForm : Form
         Close();
     }
 
+    // X button minimises to tray, only the tray menu's Exit genuinely closes it, tracked via _reallyExiting.
     protected override void OnFormClosing(FormClosingEventArgs e)
     {
         if (!_reallyExiting && _chkMinimizeTray.Checked)
@@ -795,6 +800,12 @@ public partial class MainForm : Form
         Logger.ErrorLogged -= OnErrorLogged;
         _adCycleDisplayTimer.Stop();
         _adCycleDisplayTimer.Dispose();
+
+        // Was missing before, the process ending would tear these down regardless, but stopping them explicitly avoids a lingering WebSocket close attempt or log noise racing the actual shutdown.
+        _eventSubClient?.Stop();
+        _schedulePoller?.Stop();
+        _adSequencer?.Stop();
+
         _server.Stop();
         _trayIcon.Visible = false;
         _trayIcon.Dispose();

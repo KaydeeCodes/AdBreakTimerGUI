@@ -2,11 +2,7 @@
 
 namespace AdBreakTimerGUI.Config;
 
-// A small wrapper around loading and saving JSON files, used for both
-// settings.json and the two overlay state files. Keeping this in one
-// place means I only have one spot to fix if I ever change how I
-// serialise things, rather than repeating the same JsonSerializer
-// calls everywhere.
+// Loading and saving JSON, used for settings.json and both overlay state files.
 public static class JsonStore
 {
     private static readonly JsonSerializerOptions Options = new()
@@ -15,10 +11,7 @@ public static class JsonStore
         PropertyNameCaseInsensitive = true
     };
 
-    // Returns null if the file doesn't exist yet, or if it's there but
-    // I can't parse it (corrupt, hand edited badly, whatever). Either
-    // way I fall back to defaults rather than crashing the app over a
-    // bad config file, same as the console version did.
+    // Returns null on missing or corrupt files, falls back to defaults rather than crashing over a bad config file.
     public static T? Load<T>(string file) where T : class
     {
         if (!File.Exists(file)) return null;
@@ -26,18 +19,26 @@ public static class JsonStore
         {
             return JsonSerializer.Deserialize<T>(File.ReadAllText(file), Options);
         }
-        catch
+        catch (Exception ex)
         {
+            // Logged now rather than silently swallowed, so a "why did my settings reset" question has an actual answer in the log.
+            Logger.Log("[ERROR]", $"Failed to load {file}: {ex.Message}");
             return null;
         }
     }
 
-    // Writes the object out as indented JSON, creating the containing
-    // folder first if it doesn't exist yet.
+    // Was previously unguarded, unlike Load, a failed write here used to throw straight up to whatever UI event triggered it.
     public static void Save<T>(T obj, string file)
     {
-        string? dir = Path.GetDirectoryName(file);
-        if (dir != null && !Directory.Exists(dir)) Directory.CreateDirectory(dir);
-        File.WriteAllText(file, JsonSerializer.Serialize(obj, Options));
+        try
+        {
+            string? dir = Path.GetDirectoryName(file);
+            if (dir != null && !Directory.Exists(dir)) Directory.CreateDirectory(dir);
+            File.WriteAllText(file, JsonSerializer.Serialize(obj, Options));
+        }
+        catch (Exception ex)
+        {
+            Logger.Log("[ERROR]", $"Failed to save {file}: {ex.Message}");
+        }
     }
 }

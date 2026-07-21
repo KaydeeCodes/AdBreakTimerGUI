@@ -15,6 +15,7 @@ public static class RequestRouter
 
         try
         {
+            // Only ever binds to localhost, so wide open CORS is fine, and OBS needs fresh state every poll, so no caching.
             res.AddHeader("Access-Control-Allow-Origin", "*");
             res.AddHeader("Cache-Control", "no-cache, no-store, must-revalidate");
 
@@ -24,14 +25,15 @@ public static class RequestRouter
                 return;
             }
 
-            if (path.StartsWith("/bar/api", StringComparison.OrdinalIgnoreCase))
+            // Exact match, not StartsWith, AbsolutePath never includes the query string so a prefix match here was doing nothing useful.
+            if (path.Equals("/bar/api", StringComparison.OrdinalIgnoreCase))
             {
                 var result = OverlayCommandExecutor.ExecuteBar(req.QueryString["cmd"] ?? "", req.QueryString);
                 await SendText(res, 200, "application/json; charset=utf-8", result.Json);
                 return;
             }
 
-            if (path.StartsWith("/radial/api", StringComparison.OrdinalIgnoreCase))
+            if (path.Equals("/radial/api", StringComparison.OrdinalIgnoreCase))
             {
                 var result = OverlayCommandExecutor.ExecuteRadial(req.QueryString["cmd"] ?? "", req.QueryString);
                 await SendText(res, 200, "application/json; charset=utf-8", result.Json);
@@ -50,6 +52,8 @@ public static class RequestRouter
                 return;
             }
 
+            // Worth logging, a wrong path usually means a typo'd OBS Browser Source URL, this is the fastest way to spot that.
+            Logger.Log("[ERROR]", $"404 Not Found: {path}");
             await SendText(res, 404, "text/plain", $"404 Not Found: {path}");
         }
         catch (Exception ex)
@@ -70,6 +74,7 @@ public static class RequestRouter
         res.Close();
     }
 
+    // Overlay pages are embedded resources, nothing on disk to move or delete. Resource name is the root namespace plus folder path with dots instead of slashes.
     private static async Task SendEmbedded(HttpListenerResponse res, string fileName)
     {
         Assembly asm = Assembly.GetExecutingAssembly();

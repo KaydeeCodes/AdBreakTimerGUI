@@ -2,16 +2,10 @@
 
 namespace AdBreakTimerGUI.Engine;
 
-// This is the actual heart of the app: the countdown maths and the
-// command handling that both overlays share. I've kept the method
-// names and structure as close as I can to how the console version
-// did it, since I already know that logic works and I don't want to
-// second guess it while I'm restructuring things around a GUI.
+// The countdown maths and command handling both overlays share.
 public static class TimerEngine
 {
-    // ------------------------------------------------------------
-    // Tick
-    // ------------------------------------------------------------
+    // No background timer loop, I diff against the wall clock whenever something asks, so it stays accurate through sleep/minimise/unload.
     public static void Tick(OverlayState s)
     {
         if (s.Status == "running" && s.LastTick is not null)
@@ -29,11 +23,13 @@ public static class TimerEngine
             }
             else
             {
+                // Advancing by exactly the whole seconds counted, not resetting to "now", that's the old drift bug's fix.
                 s.LastTick = s.LastTick.Value.AddSeconds(elapsedSeconds);
             }
             return;
         }
 
+        // Once finished, flash for FlashDuration then quietly go idle on its own, so nothing's ever stuck lit up.
         if (s.Status == "finished" && s.FinishedAt is not null)
         {
             double secondsSinceFinish = (DateTime.UtcNow - s.FinishedAt.Value).TotalSeconds;
@@ -45,9 +41,7 @@ public static class TimerEngine
         }
     }
 
-    // ------------------------------------------------------------
-    // Commands shared by both overlays
-    // ------------------------------------------------------------
+    // Returns false if cmd isn't one of mine, so the caller checks bar/radial specific commands next.
     public static bool HandleCommon(string cmd, NameValueCollection qs, OverlayState s, out string? error)
     {
         error = null;
@@ -55,12 +49,14 @@ public static class TimerEngine
 
         switch (cmd)
         {
+            // The one I use day to day: sets colour/direction/duration and starts, one request instead of chaining several.
             case "go":
                 {
                     string timeValue = Get("t");
                     if (string.IsNullOrEmpty(timeValue)) { error = "go requires t= (e.g. t=01:00:00)."; return true; }
                     if (!TimeParsing.TryParseDuration(timeValue, out int seconds, out error)) return true;
 
+                    // Deliberately lenient here, unlike setcolor/setfinishcolor below: a bad colour just gets skipped rather than failing the whole countdown, since go is the live "start it now" command.
                     if (!string.IsNullOrEmpty(Get("color")))
                     {
                         string? color = ColorParsing.ParseColor(Get("color"));
@@ -128,6 +124,7 @@ public static class TimerEngine
                     if (!int.TryParse(Get("s"), out int secondsToAdd)) { error = "Missing s= value."; return true; }
                     s.Remaining += Math.Abs(secondsToAdd);
                     if (s.InitialTime <= 0) s.InitialTime = s.Remaining;
+                    // Topping up a finished countdown brings it back to paused rather than leaving it stuck on the finish flash.
                     if (s.Status == "finished" && s.Remaining > 0)
                     {
                         s.Status = "paused";
@@ -188,16 +185,13 @@ public static class TimerEngine
 
             case "status":
             case "":
-                return true;
+                return true; // the 5x/sec poll, nothing to do
 
             default:
                 return false;
         }
     }
 
-    // ------------------------------------------------------------
-    // Bar specific commands
-    // ------------------------------------------------------------
     public static bool HandleBarSpecific(string cmd, NameValueCollection qs, BarState s, out string? error)
     {
         error = null;
@@ -235,9 +229,6 @@ public static class TimerEngine
         }
     }
 
-    // ------------------------------------------------------------
-    // Radial specific commands
-    // ------------------------------------------------------------
     public static bool HandleRadialSpecific(string cmd, NameValueCollection qs, RadialState s, out string? error)
     {
         error = null;
@@ -281,19 +272,13 @@ public static class TimerEngine
                 }
             case "setrotation":
                 {
-                    // Only accepting multiples of 90, that's what the
-                    // settings window's dropdown offers, no reason to
-                    // silently accept an odd angle like 45 that nothing
-                    // in the GUI would ever actually let someone pick.
+                    // Only multiples of 90, that's all the settings dropdown offers.
                     if (!int.TryParse(Get("v"), out int rotation) || rotation % 90 != 0)
                     {
                         error = "Rotation must be 0, 90, 180, or 270.";
                         return true;
                     }
-                    // Folding anything outside 0-359 back into range,
-                    // and 360 down to 0, they're visually identical, no
-                    // reason to store two values that mean the same
-                    // thing.
+                    // Folds 360 down to 0, they look identical.
                     s.RotationDegrees = ((rotation % 360) + 360) % 360;
                     return true;
                 }

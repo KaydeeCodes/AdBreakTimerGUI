@@ -2,9 +2,7 @@
 
 namespace AdBreakTimerGUI.Engine;
 
-// Same field-for-field shape as the console app's OverlayState. Kept
-// identical on purpose: a streamer's existing bar.json or radial.json
-// from the old version will still load correctly here.
+// Same shape as the console app's OverlayState so old bar.json/radial.json files still load.
 public class OverlayState
 {
     [JsonPropertyName("remaining")]
@@ -14,7 +12,7 @@ public class OverlayState
     public int InitialTime { get; set; }
 
     [JsonPropertyName("status")]
-    public string Status { get; set; } = "idle";
+    public string Status { get; set; } = "idle"; // idle, running, paused, finished
 
     [JsonPropertyName("lastTick")]
     public DateTime? LastTick { get; set; }
@@ -53,19 +51,15 @@ public class BarState : OverlayState
 public class RadialState : OverlayState
 {
     [JsonPropertyName("size")]
-    public int Size { get; set; } = 60;
+    public int Size { get; set; } = 60; // % of the smaller viewport side
 
     [JsonPropertyName("thickness")]
-    public int Thickness { get; set; } = 7;
+    public int Thickness { get; set; } = 7; // % of the diameter
 
     [JsonPropertyName("trackColor")]
     public string TrackColor { get; set; } = "rgba(255,255,255,0.15)";
 
-    // Extra rotation on top of the ring's natural 12 o'clock starting
-    // point, in degrees. Only 0/90/180/270 are actually offered in the
-    // settings window, but I'm not restricting the type itself to
-    // those, radial.html just adds whatever's here to the base -90
-    // degree rotation it already applies.
+    // Extra rotation on top of the ring's 12 o'clock start, 0/90/180/270 only, per the settings dropdown.
     [JsonPropertyName("rotationDegrees")]
     public int RotationDegrees { get; set; } = 0;
 

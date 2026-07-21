@@ -7,19 +7,14 @@ namespace AdBreakTimerGUI.Twitch;
 
 public enum AdSequencerTarget { Bar, Radial, Both }
 
+// Turns TwitchEventSubClient's AdBreakBegan into the actual red-then-green cycle, and keeps the green target honest against the schedule poller.
 public class TwitchAdSequencer
 {
     private const string AdColor = "#ff0000";
     private const string AdFreeColor = "#00ff00";
     private const int MinimumAdFreeSeconds = 5;
-
-    // How long I'm willing to wait for an immediate poll before giving
-    // up and falling back to the local guess. Short on purpose, this
-    // is meant to feel instant, not to make the green bar visibly
-    // hesitate before appearing.
     private static readonly TimeSpan ImmediatePollTimeout = TimeSpan.FromSeconds(5);
-
-    private const double AdjustThresholdSeconds = 5;
+    private const double AdjustThresholdSeconds = 5; // ignore poll jitter smaller than this
 
     private enum Phase { Idle, Ad, AdFree }
     private volatile Phase _phase = Phase.Idle;
@@ -45,11 +40,7 @@ public class TwitchAdSequencer
 
     public void Attach(TwitchEventSubClient client) => client.AdBreakBegan += (_, e) => OnAdBreakBegan(e.DurationSeconds);
 
-    // Keeping a reference to the poller now, not just subscribing to
-    // its event, so RunCycleAsync can ask it for one immediate reading
-    // the moment the ad-free phase starts, rather than only ever
-    // reacting passively to whatever the background loop happens to
-    // publish next.
+    // Keeping a reference, not just subscribing, so RunCycleAsync can ask for one immediate reading rather than only reacting passively to the background loop.
     public void AttachSchedulePoller(TwitchAdSchedulePoller poller)
     {
         _schedulePoller = poller;
@@ -91,10 +82,7 @@ public class TwitchAdSequencer
         _ = RunCycleAsync(durationSeconds, newCts.Token);
     }
 
-    // Called whenever the background poller publishes a fresh answer.
-    // Only actually does anything while the ad-free phase is running,
-    // reacting during the red countdown wouldn't mean anything, the
-    // real ad event owns that entirely.
+    // Fired by the background poller, only means anything while the ad-free phase is running, the real ad event owns the red phase entirely.
     private void AdjustAdFreeTarget(DateTime? nextAdAtUtc)
     {
         if (_phase != Phase.AdFree) return;
@@ -133,11 +121,8 @@ public class TwitchAdSequencer
                 await Task.Delay(TimeSpan.FromSeconds(settings.AdBufferSeconds), token);
             }
 
-            // Try to get the real answer immediately, before showing
-            // anything, rather than guessing and correcting later.
-            // This is the fix for the visible "shows 43 minutes, then
-            // jumps to 53" jarring correction, if this succeeds, the
-            // green bar's very first frame is already the true value.
+            // Try the real answer first, before showing anything, this is what stops the old "shows a guess, then jumps" jump.
+            // _phase is still Phase.Ad here, so if this poll's ScheduleUpdated fires, AdjustAdFreeTarget's phase check ignores it, no double-fire against the target set below.
             AdScheduleData? fresh = null;
             if (_schedulePoller != null)
             {
@@ -149,9 +134,7 @@ public class TwitchAdSequencer
                 }
                 catch (OperationCanceledException) when (!token.IsCancellationRequested)
                 {
-                    // Just the 5 second timeout expiring, not the cycle
-                    // itself being cancelled, fall through to the local
-                    // estimate below same as if this poll never happened.
+                    // Just the timeout, not the cycle being cancelled, fall through to the local estimate below.
                 }
             }
 
@@ -170,10 +153,10 @@ public class TwitchAdSequencer
                 adFreeSeconds = Math.Max(MinimumAdFreeSeconds, rawAdFreeSeconds);
 
                 if (rawAdFreeSeconds < MinimumAdFreeSeconds)
-                    Logger.Log("[ERROR]", $"Configured cycle length ({settings.AdFreeSeconds}s) is too short for a {adDurationSeconds}s ad plus a {settings.AdBufferSeconds}s buffer, flooring the ad-free countdown to {MinimumAdFreeSeconds}s instead of {rawAdFreeSeconds}s.");
+                    Logger.Log("[ERROR]", $"Configured cycle length ({settings.AdFreeSeconds}s) is too short for a {adDurationSeconds}s ad plus a {settings.AdBufferSeconds}s buffer, flooring to {MinimumAdFreeSeconds}s.");
 
                 targetUtc = DateTime.UtcNow.AddSeconds(adFreeSeconds);
-                Logger.Log("[TWITCH]", $"Starting ad-free countdown for {adFreeSeconds}s (cycle {settings.AdFreeSeconds}s minus {adDurationSeconds}s ad minus {settings.AdBufferSeconds}s buffer), no fresh schedule reading available yet, the background poller will correct this within 30s if needed.");
+                Logger.Log("[TWITCH]", $"Starting ad-free countdown for {adFreeSeconds}s (local estimate, no fresh schedule reading yet, the background poller will correct within 30s if needed).");
             }
 
             lock (_targetLock) { _adFreeTargetUtc = targetUtc; }
@@ -182,6 +165,7 @@ public class TwitchAdSequencer
 
             FireGo(target, adFreeSeconds, AdFreeColor);
 
+            // Waiting in short steps against a target that can move, rather than one long delay, so AdjustAdFreeTarget can change the wait without a full cycle restart.
             while (true)
             {
                 DateTime currentTarget;
@@ -217,6 +201,7 @@ public class TwitchAdSequencer
         {
             ["t"] = TimeParsing.SecsToHms(seconds),
             ["color"] = color
+            // No dir=, that leaves whatever's already saved (drain/fill, cw/ccw) untouched.
         };
 
         if (target is AdSequencerTarget.Bar or AdSequencerTarget.Both)

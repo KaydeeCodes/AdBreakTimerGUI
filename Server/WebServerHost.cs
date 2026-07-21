@@ -3,19 +3,10 @@ using AdBreakTimerGUI.Config;
 
 namespace AdBreakTimerGUI.Server;
 
-// The bit that owns the actual HttpListener and its background task.
-// Unlike the console version, which just started this once and ran
-// until the window closed, this needs a proper Start/Stop I can call
-// from the GUI's button whenever I like, so I'm wrapping it up as its
-// own class with state rather than leaving it as loose top level code.
+// Owns the HttpListener and its background task, with a proper Start/Stop I can call from the GUI's button.
 public class WebServerHost
 {
-    // I raise this whenever the server's state changes, so the GUI can
-    // update the traffic light and the tray icon without me having to
-    // poll anything. Whoever's listening (MainForm) needs to remember
-    // this fires on a background thread, not the UI thread, so any
-    // control update on the other end needs an Invoke.
-    public event Action<bool>? StatusChanged; // true = running, false = stopped
+    public event Action<bool>? StatusChanged; // true = running, false = stopped, fires on a background thread
 
     private HttpListener? _listener;
     private CancellationTokenSource? _cts;
@@ -24,10 +15,7 @@ public class WebServerHost
     public bool IsRunning { get; private set; }
     public int Port { get; private set; }
 
-    // Tries the saved port first, and if that's already taken by
-    // something else, walks upward one at a time until it finds a free
-    // one. Whichever port actually ends up bound gets saved back to
-    // settings so next launch remembers it.
+    // Tries the saved port, walks upward if it's taken, saves whichever one actually worked.
     public void Start(int preferredPort)
     {
         if (IsRunning) return;
@@ -55,6 +43,9 @@ public class WebServerHost
         if (listener == null)
             throw new Exception("Could not find a free port after 50 attempts. That's almost certainly not actually a port problem, something else is wrong.");
 
+        if (port != preferredPort)
+            Logger.Log("[SERVER]", $"Port {preferredPort} was taken, using {port} instead.");
+
         _listener = listener;
         Port = port;
         _cts = new CancellationTokenSource();
@@ -63,11 +54,7 @@ public class WebServerHost
         Logger.Log("[SERVER]", $"Listening on http://localhost:{port}/");
         StatusChanged?.Invoke(true);
 
-        // I run the accept loop as a background task rather than
-        // blocking whatever thread called Start(). On the GUI thread
-        // that would freeze the window, and I want Start() to return
-        // straight away so the button click handler isn't hanging
-        // around waiting for something that's meant to run forever.
+        // Background task, not awaited, so Start() returns immediately rather than blocking the button click that called it.
         _listenLoopTask = Task.Run(() => ListenLoopAsync(_listener, _cts.Token));
     }
 
@@ -82,27 +69,18 @@ public class WebServerHost
             }
             catch (Exception) when (token.IsCancellationRequested)
             {
-                // This is the expected way the loop ends. Stop() below
-                // calls listener.Stop(), which makes GetContextAsync
-                // throw straight away. I'm catching it here specifically
-                // because the cancellation token is already set, so I
-                // know this is a deliberate shutdown and not a real
-                // error worth logging.
+                // Expected shutdown path, Stop() below calls listener.Stop() which makes this throw on purpose.
                 break;
             }
             catch (Exception ex)
             {
-                // A genuine unexpected error, not a shutdown. I log it
-                // and keep the loop going rather than letting one bad
-                // request take the whole server down.
+                // A genuine unexpected error, not a shutdown. Logged and the loop keeps going, but with a short delay first, without it a persistent error here would spin as a tight CPU-burning loop instead of backing off.
                 Logger.Log("[ERROR]", ex.Message);
+                try { await Task.Delay(500, token); } catch (OperationCanceledException) { break; }
                 continue;
             }
 
-            // I don't await this. Firing requests off one after another
-            // and awaiting each one in turn would mean a slow request
-            // blocks every other one behind it, and since the overlay
-            // pages poll five times a second, that adds up fast.
+            // Not awaited, a slow request awaited in sequence would block every poll behind it, and the overlays poll 5x/sec.
             _ = RequestRouter.HandleRequest(ctx);
         }
     }
