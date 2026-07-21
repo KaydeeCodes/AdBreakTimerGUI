@@ -68,11 +68,14 @@ public class TwitchAdSequencer
         LastAdStartedUtc = DateTime.UtcNow;
         NextAdEstimatedUtc = null;
 
-        var newCts = new CancellationTokenSource();
+        CancellationTokenSource newCts;
         lock (_lock)
         {
             _cycleCts?.Cancel();
+            newCts = new CancellationTokenSource();
             _cycleCts = newCts;
+            // Set here, synchronously, under the same lock as the token swap, not inside RunAdCycleAsync once it eventually starts running. A real ad break and a schedule poll fire from two genuinely separate background threads, without this, there was a small window where a poll landing right after this method returns but before the async body's first line runs would still see Idle and wrongly steal the cycle from a real ad that's only microseconds old.
+            _phase = Phase.Ad;
         }
 
         _ = RunAdCycleAsync(durationSeconds, newCts);
@@ -86,19 +89,23 @@ public class TwitchAdSequencer
             return;
         }
 
-        if (_phase == Phase.Idle && data.NextAdAtUtc is { } nextAd && nextAd > DateTime.UtcNow)
+        if (data.NextAdAtUtc is not { } nextAd || nextAd <= DateTime.UtcNow) return;
+
+        CancellationTokenSource newCts;
+        lock (_lock)
         {
+            // Re-checked here, inside the lock, this is the actual fix. OnAdBreakBegan transitions phase under this same lock, so if a real ad break claimed the cycle a moment ago, this now correctly sees Phase.Ad and backs off instead of racing it.
+            if (_phase != Phase.Idle) return;
+
             Logger.Log("[TWITCH]", $"No cycle running, but Twitch's schedule shows a next ad at {nextAd.ToLocalTime():HH:mm:ss}, starting the ad-free countdown now instead of waiting for that ad to actually happen.");
 
-            var newCts = new CancellationTokenSource();
-            lock (_lock)
-            {
-                _cycleCts?.Cancel();
-                _cycleCts = newCts;
-            }
-
-            _ = RunAdFreeFromScheduleAsync(nextAd, newCts);
+            _cycleCts?.Cancel();
+            newCts = new CancellationTokenSource();
+            _cycleCts = newCts;
+            _phase = Phase.AdFree;
         }
+
+        _ = RunAdFreeFromScheduleAsync(nextAd, newCts);
     }
 
     private void AdjustAdFreeTarget(DateTime? nextAdAtUtc)
@@ -138,11 +145,10 @@ public class TwitchAdSequencer
             AppSettings settings = _getSettings();
             AdSequencerTarget target = _getTarget();
 
-            _phase = Phase.Ad;
+            // _phase is already Ad here, set synchronously by OnAdBreakBegan before this method was ever scheduled to run.
             FireGo(target, adDurationSeconds, isAdPhase: true);
             await Task.Delay(TimeSpan.FromSeconds(adDurationSeconds), token);
 
-            // This pause is what gives the ad's own finish flash room to actually be seen before the next go call overwrites it, same idea as the fix below for the ad-free side, just already working here because this wait already existed for a different stated reason.
             if (settings.AdBufferSeconds > 0)
             {
                 Logger.Log("[TWITCH]", $"Ad countdown finished, waiting {settings.AdBufferSeconds}s before the ad-free countdown.");
@@ -225,7 +231,7 @@ public class TwitchAdSequencer
     {
         lock (_targetLock) { _adFreeTargetUtc = targetUtc; }
         NextAdEstimatedUtc = targetUtc;
-        _phase = Phase.AdFree;
+        _phase = Phase.AdFree; // already set by OnScheduleUpdated for the schedule-started path, this covers the RunAdCycleAsync path where it hasn't been set yet
 
         int adFreeSeconds = Math.Max(MinimumAdFreeSeconds, (int)(targetUtc - DateTime.UtcNow).TotalSeconds);
         FireGo(target, adFreeSeconds, isAdPhase: false);
@@ -245,22 +251,23 @@ public class TwitchAdSequencer
         _phase = Phase.Idle;
         NextAdEstimatedUtc = null;
 
-        // Deliberately not sending a stop command here any more, that was the actual bug: the overlay's own Tick() already handles running -> finished -> flash -> auto idle entirely on its own, purely from the overlay page's regular polling, completely independent of anything this class does. Forcing a stop the instant our own local timer hit the target was cutting that natural flash off before it ever had a chance to show, which is exactly what looked like the bar "vanishing" instead of flashing. Same principle as the ad phase's buffer wait above, just applied by doing nothing instead of waiting, since a real ad event should be arriving right around now anyway.
-        Logger.Log("[TWITCH]", "Ad-free countdown reached its target, leaving the overlay to finish and flash naturally rather than forcing it to idle immediately.");
+        // Deliberately not sending a stop command, TimerEngine.Tick() handles running -> finished -> flash/static/hidden -> auto idle entirely on its own from the overlay page's regular polling. Forcing a stop here would cut that natural finish behaviour off before it gets to show.
+        Logger.Log("[TWITCH]", "Ad-free countdown reached its target, leaving the overlay to finish naturally rather than forcing it to idle immediately.");
     }
 
+    // Picks between the ad-free colour and the genuinely separate ad colour, FinishColor is purely the "idle bar" state now, unrelated to which phase just ran.
     private static void FireGo(AdSequencerTarget target, int seconds, bool isAdPhase)
     {
         if (target is AdSequencerTarget.Bar or AdSequencerTarget.Both)
         {
-            var (color, finishColor) = OverlayCommandExecutor.GetBarColors();
-            var qs = new NameValueCollection { ["t"] = TimeParsing.SecsToHms(seconds), ["color"] = isAdPhase ? finishColor : color };
+            var (adFreeColor, adColor, _) = OverlayCommandExecutor.GetBarColors();
+            var qs = new NameValueCollection { ["t"] = TimeParsing.SecsToHms(seconds), ["color"] = isAdPhase ? adColor : adFreeColor };
             LogIfError(OverlayCommandExecutor.ExecuteBar("go", qs));
         }
         if (target is AdSequencerTarget.Radial or AdSequencerTarget.Both)
         {
-            var (color, finishColor) = OverlayCommandExecutor.GetRadialColors();
-            var qs = new NameValueCollection { ["t"] = TimeParsing.SecsToHms(seconds), ["color"] = isAdPhase ? finishColor : color };
+            var (adFreeColor, adColor, _) = OverlayCommandExecutor.GetRadialColors();
+            var qs = new NameValueCollection { ["t"] = TimeParsing.SecsToHms(seconds), ["color"] = isAdPhase ? adColor : adFreeColor };
             LogIfError(OverlayCommandExecutor.ExecuteRadial("go", qs));
         }
     }

@@ -32,20 +32,29 @@ public class TwitchTokenValidator
     {
         while (!token.IsCancellationRequested)
         {
-            TwitchTokenData? current = await _getToken();
-            if (current != null)
+            try
             {
-                bool valid = await TwitchAuthService.ValidateAsync(current, token);
-                if (!valid)
+                TwitchTokenData? current = await _getToken();
+                if (current != null)
                 {
-                    Logger.Log("[TWITCH]", "Token validate failed, the account was most likely disconnected from Twitch's side.");
-                    TokenInvalid?.Invoke();
-                    break; // nothing left to validate until reconnected
+                    bool valid = await TwitchAuthService.ValidateAsync(current, token);
+                    if (!valid)
+                    {
+                        Logger.Log("[TWITCH]", "Token validate failed, the account was most likely disconnected from Twitch's side.");
+                        TokenInvalid?.Invoke();
+                        break; // nothing left to validate until reconnected
+                    }
                 }
+            }
+            catch (OperationCanceledException)
+            {
+                // ValidateAsync rethrows this if Stop() fires mid-request, was previously uncaught here, meaning the loop could end without ever hitting the log line below, the only one of the four background services in this project that didn't reliably confirm a clean stop.
+                break;
             }
 
             try { await Task.Delay(ValidateInterval, token); }
             catch (OperationCanceledException) { break; }
         }
+        Logger.Log("[TWITCH]", "Token validator stopped.");
     }
 }

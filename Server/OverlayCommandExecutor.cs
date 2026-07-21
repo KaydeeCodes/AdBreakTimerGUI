@@ -66,7 +66,7 @@ public static class OverlayCommandExecutor
 
         string detail = error != null
             ? $"FAILED {cmd}: {error}"
-            : $"{cmd} (status={state.Status}, color={state.Color}, preferredColor={state.PreferredColor}, finishColor={state.FinishColor}, remaining={TimeParsing.SecsToHms(state.Remaining)})";
+            : $"{cmd} (status={state.Status}, color={state.Color}, preferredColor={state.PreferredColor}, adColor={state.AdColor}, finishColor={state.FinishColor}, finishStyle={state.FinishStyle}, remaining={TimeParsing.SecsToHms(state.Remaining)})";
 
         Logger.Log(tag, detail);
     }
@@ -82,14 +82,15 @@ public static class OverlayCommandExecutor
             string oldWidth = state.BarWidth;
             string oldLiveColor = state.Color;
             string oldPreferredColor = state.PreferredColor;
+            string oldAdColor = state.AdColor;
             string oldFinishColor = state.FinishColor;
             string oldBgColor = state.BgColor;
-            bool oldFlash = state.FlashOnFinish;
+            string oldFinishStyle = state.FinishStyle;
             int oldFlashDuration = state.FlashDuration;
 
             mutate(state);
 
-            // If the bar was already showing the running colour (not an active ad's finish colour override), pushing the new preference live is safe, this is what makes Save feel instant rather than "changed, but nothing visibly happened until some later countdown". If it wasn't showing the running colour, that almost certainly means an ad's mid-flight right now, so I deliberately leave the live display alone and let the new preference take effect on the next real transition instead of interrupting it.
+            // Only push the new ad-free colour live if the bar was already showing it (not an active ad's colour), an ad's likely mid-flight otherwise, so the new preference takes effect on the next real transition instead of interrupting it.
             bool wasShowingRunningColor = oldLiveColor == oldPreferredColor;
             bool applyLiveNow = wasShowingRunningColor && state.PreferredColor != oldPreferredColor;
             if (applyLiveNow)
@@ -102,9 +103,10 @@ public static class OverlayCommandExecutor
             if (oldHeight != state.BarHeight) changes.Add($"height {oldHeight}px->{state.BarHeight}px");
             if (oldWidth != state.BarWidth) changes.Add($"width {oldWidth}->{state.BarWidth}");
             if (oldPreferredColor != state.PreferredColor) changes.Add($"preferredColor {oldPreferredColor}->{state.PreferredColor}{(applyLiveNow ? " (applied live immediately)" : " (will apply next countdown, an ad's likely showing right now)")}");
+            if (oldAdColor != state.AdColor) changes.Add($"adColor {oldAdColor}->{state.AdColor}");
             if (oldFinishColor != state.FinishColor) changes.Add($"finishColor {oldFinishColor}->{state.FinishColor}");
             if (oldBgColor != state.BgColor) changes.Add($"bgColor {oldBgColor}->{state.BgColor}");
-            if (oldFlash != state.FlashOnFinish) changes.Add($"flashOnFinish {oldFlash}->{state.FlashOnFinish}");
+            if (oldFinishStyle != state.FinishStyle) changes.Add($"finishStyle {oldFinishStyle}->{state.FinishStyle}");
             if (oldFlashDuration != state.FlashDuration) changes.Add($"flashDuration {oldFlashDuration}s->{state.FlashDuration}s");
 
             Logger.Log("[BAR]", changes.Count > 0 ? $"Appearance updated: {string.Join(", ", changes)}" : "Appearance settings saved, no actual changes.");
@@ -124,9 +126,10 @@ public static class OverlayCommandExecutor
             int oldRotation = state.RotationDegrees;
             string oldLiveColor = state.Color;
             string oldPreferredColor = state.PreferredColor;
+            string oldAdColor = state.AdColor;
             string oldFinishColor = state.FinishColor;
             string oldBgColor = state.BgColor;
-            bool oldFlash = state.FlashOnFinish;
+            string oldFinishStyle = state.FinishStyle;
             int oldFlashDuration = state.FlashDuration;
 
             mutate(state);
@@ -145,30 +148,32 @@ public static class OverlayCommandExecutor
             if (oldTrackColor != state.TrackColor) changes.Add($"trackColor {oldTrackColor}->{state.TrackColor}");
             if (oldRotation != state.RotationDegrees) changes.Add($"rotation {oldRotation}deg->{state.RotationDegrees}deg");
             if (oldPreferredColor != state.PreferredColor) changes.Add($"preferredColor {oldPreferredColor}->{state.PreferredColor}{(applyLiveNow ? " (applied live immediately)" : " (will apply next countdown, an ad's likely showing right now)")}");
+            if (oldAdColor != state.AdColor) changes.Add($"adColor {oldAdColor}->{state.AdColor}");
             if (oldFinishColor != state.FinishColor) changes.Add($"finishColor {oldFinishColor}->{state.FinishColor}");
             if (oldBgColor != state.BgColor) changes.Add($"bgColor {oldBgColor}->{state.BgColor}");
-            if (oldFlash != state.FlashOnFinish) changes.Add($"flashOnFinish {oldFlash}->{state.FlashOnFinish}");
+            if (oldFinishStyle != state.FinishStyle) changes.Add($"finishStyle {oldFinishStyle}->{state.FinishStyle}");
             if (oldFlashDuration != state.FlashDuration) changes.Add($"flashDuration {oldFlashDuration}s->{state.FlashDuration}s");
 
             Logger.Log("[RADIAL]", changes.Count > 0 ? $"Appearance updated: {string.Join(", ", changes)}" : "Appearance settings saved, no actual changes.");
         }
     }
 
-    public static (string color, string finishColor) GetBarColors()
+    // Returns all three now, ad-free colour, ad colour, and finish colour, instead of just two.
+    public static (string adFreeColor, string adColor, string finishColor) GetBarColors()
     {
         lock (BarLock)
         {
             BarState state = JsonStore.Load<BarState>(Paths.BarFile) ?? new BarState();
-            return (state.PreferredColor, state.FinishColor);
+            return (state.PreferredColor, state.AdColor, state.FinishColor);
         }
     }
 
-    public static (string color, string finishColor) GetRadialColors()
+    public static (string adFreeColor, string adColor, string finishColor) GetRadialColors()
     {
         lock (RadialLock)
         {
             RadialState state = JsonStore.Load<RadialState>(Paths.RadialFile) ?? new RadialState();
-            return (state.PreferredColor, state.FinishColor);
+            return (state.PreferredColor, state.AdColor, state.FinishColor);
         }
     }
 }

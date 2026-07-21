@@ -230,7 +230,7 @@ public partial class MainForm : Form
             Size = new Size(360, 40),
             ForeColor = Color.Gray,
             Font = new Font("Segoe UI", 7.5F),
-            Text = "Test starts a plain 1 hour countdown using your saved running colour, so it also works as a quick preview after changing colours in Overlay settings."
+            Text = "Test starts a plain 1 hour countdown using your saved ad-free colour, so it also works as a quick preview after changing colours in Overlay settings."
         };
         tab.Controls.Add(hint);
     }
@@ -497,7 +497,8 @@ public partial class MainForm : Form
 
         Logger.Log("[TWITCH]", "Disconnected.");
         UpdateAutoDetectRunningState();
-        EnsureTokenValidator().Start();
+        // Was wrongly calling EnsureTokenValidator().Start() here before, a copy-paste leftover from the connect path. There's no token to validate any more at this point, this genuinely mirrors OnTwitchTokenInvalid's handling of the same situation now, stop it, don't start a pointless loop that just checks a null token every hour until reconnected.
+        _tokenValidator?.Stop();
     }
 
     private async Task<TwitchTokenData?> GetValidTwitchTokenAsync()
@@ -665,7 +666,6 @@ public partial class MainForm : Form
         Clipboard.SetText(text);
     }
 
-    // Now explicitly includes the saved running colour (color=), rather than leaving it unset. Previously Test just started a countdown without touching colour at all, meaning it never actually reflected whatever's saved in Overlay settings, so there was no quick way to confirm a colour change without waiting for a real ad cycle to roll around.
     private async void FireTestCountdown(string overlay)
     {
         if (!_server.IsRunning)
@@ -676,8 +676,8 @@ public partial class MainForm : Form
         }
 
         string color = overlay == "bar"
-            ? OverlayCommandExecutor.GetBarColors().color
-            : OverlayCommandExecutor.GetRadialColors().color;
+            ? OverlayCommandExecutor.GetBarColors().adFreeColor
+            : OverlayCommandExecutor.GetRadialColors().adFreeColor;
 
         string url = $"http://localhost:{_server.Port}/{overlay}/api?cmd=go&t=01:00:00&color={Uri.EscapeDataString(color)}";
         Logger.Log("[TEST]", $"Firing test countdown for {overlay}, read colour \"{color}\", full URL: {url}");

@@ -29,7 +29,7 @@ public static class TimerEngine
             return;
         }
 
-        // Once finished, flash for FlashDuration then quietly go idle on its own, so nothing's ever stuck lit up.
+        // Once finished, hold whatever finish style is chosen for FlashDuration seconds then quietly go idle on its own, so nothing's ever stuck lit up. Tick() itself doesn't care what finishStyle actually is, flash/static/hidden are purely how the HTML overlay pages draw the same finished state, the timing here is identical for all three.
         if (s.Status == "finished" && s.FinishedAt is not null)
         {
             double secondsSinceFinish = (DateTime.UtcNow - s.FinishedAt.Value).TotalSeconds;
@@ -56,7 +56,7 @@ public static class TimerEngine
                     if (string.IsNullOrEmpty(timeValue)) { error = "go requires t= (e.g. t=01:00:00)."; return true; }
                     if (!TimeParsing.TryParseDuration(timeValue, out int seconds, out error)) return true;
 
-                    // Deliberately lenient here, unlike setcolor/setfinishcolor below: a bad colour just gets skipped rather than failing the whole countdown, since go is the live "start it now" command.
+                    // Deliberately lenient here, unlike setcolor/setfinishcolor/setadcolor below: a bad colour just gets skipped rather than failing the whole countdown, since go is the live "start it now" command.
                     if (!string.IsNullOrEmpty(Get("color")))
                     {
                         string? color = ColorParsing.ParseColor(Get("color"));
@@ -68,7 +68,15 @@ public static class TimerEngine
                         if (finishColor != null) s.FinishColor = finishColor;
                     }
                     if (!string.IsNullOrEmpty(Get("dir"))) s.Direction = Get("dir").ToLowerInvariant();
-                    if (!string.IsNullOrEmpty(Get("flash"))) s.FlashOnFinish = ColorParsing.ParseBool(Get("flash"), s.FlashOnFinish);
+
+                    // Kept for backward compatibility with existing Streamer.bot setups using flash=on/off, on maps to "flash", off maps to "static". finishstyle= below is the real, full three-way option going forward.
+                    if (!string.IsNullOrEmpty(Get("flash"))) s.FinishStyle = ColorParsing.ParseBool(Get("flash"), s.FinishStyle == "flash") ? "flash" : "static";
+                    if (!string.IsNullOrEmpty(Get("finishstyle")))
+                    {
+                        string style = Get("finishstyle").ToLowerInvariant();
+                        if (style is "flash" or "static" or "hidden") s.FinishStyle = style;
+                    }
+
                     if (!string.IsNullOrEmpty(Get("flashfor")) && int.TryParse(Get("flashfor"), out int flashSeconds) && flashSeconds >= 0)
                         s.FlashDuration = flashSeconds;
 
@@ -124,7 +132,7 @@ public static class TimerEngine
                     if (!int.TryParse(Get("s"), out int secondsToAdd)) { error = "Missing s= value."; return true; }
                     s.Remaining += Math.Abs(secondsToAdd);
                     if (s.InitialTime <= 0) s.InitialTime = s.Remaining;
-                    // Topping up a finished countdown brings it back to paused rather than leaving it stuck on the finish flash.
+                    // Topping up a finished countdown brings it back to paused rather than leaving it stuck on the finish state.
                     if (s.Status == "finished" && s.Remaining > 0)
                     {
                         s.Status = "paused";
@@ -162,6 +170,14 @@ public static class TimerEngine
                     return true;
                 }
 
+            case "setadcolor":
+                {
+                    string? color = ColorParsing.ParseColor(Get("v"));
+                    if (color == null) { error = "Invalid colour."; return true; }
+                    s.AdColor = color;
+                    return true;
+                }
+
             case "setbgcolor":
                 {
                     string? color = ColorParsing.ParseColor(Get("v"));
@@ -171,8 +187,20 @@ public static class TimerEngine
                 }
 
             case "setflash":
-                s.FlashOnFinish = ColorParsing.ParseBool(Get("v"), s.FlashOnFinish);
+                s.FinishStyle = ColorParsing.ParseBool(Get("v"), s.FinishStyle == "flash") ? "flash" : "static";
                 return true;
+
+            case "setfinishstyle":
+                {
+                    string style = Get("v").ToLowerInvariant();
+                    if (style is not ("flash" or "static" or "hidden"))
+                    {
+                        error = "Finish style must be flash, static, or hidden.";
+                        return true;
+                    }
+                    s.FinishStyle = style;
+                    return true;
+                }
 
             case "setflashduration":
                 if (!int.TryParse(Get("v"), out int newFlashDuration) || newFlashDuration < 0)
@@ -272,13 +300,11 @@ public static class TimerEngine
                 }
             case "setrotation":
                 {
-                    // Only multiples of 90, that's all the settings dropdown offers.
                     if (!int.TryParse(Get("v"), out int rotation) || rotation % 90 != 0)
                     {
                         error = "Rotation must be 0, 90, 180, or 270.";
                         return true;
                     }
-                    // Folds 360 down to 0, they look identical.
                     s.RotationDegrees = ((rotation % 360) + 360) % 360;
                     return true;
                 }

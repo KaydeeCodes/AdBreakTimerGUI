@@ -19,7 +19,7 @@
         }
 
         #ring {
-            transition: stroke-dashoffset 0.25s linear, stroke 0.3s ease;
+            transition: stroke-dashoffset 0.25s linear, stroke 0.3s ease, opacity 0.2s ease;
         }
 
         #ring.pulse {
@@ -42,12 +42,10 @@
     const API = "/radial/api";
     let lastState = null;
 
-    // Cached once rather than re-queried every render, this runs 5x/sec for as long as the overlay's open.
     const svgEl = document.getElementById('svg');
     const trackEl = document.getElementById('track');
     const ringEl = document.getElementById('ring');
 
-    // Diameter as a % of whichever viewport side is smaller, recalculated every render so the ring actually resizes with the OBS source
     function computeDiameter(sizePercent) {
         const vmin = Math.min(window.innerWidth, window.innerHeight);
         return Math.max(20, vmin * (sizePercent / 100));
@@ -83,7 +81,7 @@
 
         let drawnFraction;
         if (state.status === 'finished') {
-            drawnFraction = 1; // fully drawn so the finish colour flash is visible
+            drawnFraction = 1;
         } else if (state.status === 'idle') {
             drawnFraction = 0;
         } else {
@@ -91,7 +89,6 @@
         }
         ringEl.setAttribute('stroke-dashoffset', circumference * (1 - drawnFraction));
 
-        // Rotates to start at 12 o'clock plus rotationDegrees, mirror flips cw/ccw.
         // Mirror is on 'cw' not 'ccw' here, SVG draws clockwise by default so that looked backwards until testing showed it needed swapping, see project notes for why.
         const mirror = state.direction === 'cw' ? 'scale(-1,1)' : '';
         const rotationOffset = Number(state.rotationDegrees) || 0;
@@ -100,7 +97,17 @@
         const color = state.status === 'finished' ? state.finishColor : state.color;
         ringEl.setAttribute('stroke', color);
 
-        ringEl.classList.toggle('pulse', state.status === 'finished' && state.flashOnFinish);
+        // Same three styles as the bar. "hidden" uses opacity rather than shrinking the ring, a shrinking ring reads as "draining again", invisible reads clearly as "gone for a moment".
+        if (state.status === 'finished' && state.finishStyle === 'hidden') {
+            ringEl.style.opacity = '0';
+            ringEl.classList.remove('pulse');
+        } else if (state.status === 'finished' && state.finishStyle === 'flash') {
+            ringEl.style.opacity = '';
+            ringEl.classList.add('pulse');
+        } else {
+            ringEl.style.opacity = '';
+            ringEl.classList.remove('pulse');
+        }
     }
 
     window.addEventListener('resize', () => {
