@@ -1,6 +1,6 @@
 # Ad Break Timer
 
-![Version](https://img.shields.io/badge/version-1.0.0-brightgreen)
+![Version](https://img.shields.io/badge/version-1.0.2-brightgreen)
 ![Platform](https://img.shields.io/badge/platform-Windows-0078D6)
 ![.NET](https://img.shields.io/badge/.NET-10.0-512BD4)
 
