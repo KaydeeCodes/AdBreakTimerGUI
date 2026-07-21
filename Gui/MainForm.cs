@@ -1,5 +1,7 @@
+using System.Collections.Specialized;
 using System.Diagnostics;
 using System.Net.Http;
+using AdBreakTimerGUI.Automation;
 using AdBreakTimerGUI.Config;
 using AdBreakTimerGUI.Engine;
 using AdBreakTimerGUI.Gui;
@@ -32,6 +34,7 @@ public partial class MainForm : Form
     private TextBox _txtAdBreak = null!;
     private TextBox _txtAdFree = null!;
     private NumericUpDown _numAdBuffer = null!;
+    private CheckBox _chkLocalLoop = null!;
     private Button _btnSaveSettings = null!;
 
     private Label _lblTwitchStatus = null!;
@@ -42,6 +45,7 @@ public partial class MainForm : Form
     private TwitchEventSubClient? _eventSubClient;
     private TwitchAdSchedulePoller? _schedulePoller;
     private TwitchAdSequencer? _adSequencer;
+    private LocalAdSequencer? _localSequencer;
     private ComboBox _cmbAutoDetectTarget = null!;
     private TwitchTokenValidator? _tokenValidator;
     private PictureBox _picTwitchAvatar = null!;
@@ -154,7 +158,7 @@ public partial class MainForm : Form
         Controls.Add(NewSeparator(y));
         y += 16;
 
-        var tabs = new TabControl { Location = new Point(16, y), Size = new Size(404, 236) };
+        var tabs = new TabControl { Location = new Point(16, y), Size = new Size(404, 270) };
 
         var linksTab = new TabPage("Links");
         var timingTab = new TabPage("Timing");
@@ -211,11 +215,11 @@ public partial class MainForm : Form
     private void BuildLinksTab(TabPage tab)
     {
         int y = 12;
-        _txtBarUrl = NewLinkRow(tab, "Bar overlay", y, true, out Button copyBar, out Button? testBar);
+        _txtBarUrl = NewLinkRow(tab, "Bar overlay", y, true, out Button copyBar, out Button? testBar, out Button? stopBar);
         y += 46;
-        _txtRadialUrl = NewLinkRow(tab, "Radial overlay", y, true, out Button copyRadial, out Button? testRadial);
+        _txtRadialUrl = NewLinkRow(tab, "Radial overlay", y, true, out Button copyRadial, out Button? testRadial, out Button? stopRadial);
         y += 46;
-        _txtApiExample = NewLinkRow(tab, "Example go command", y, false, out Button copyApi, out _);
+        _txtApiExample = NewLinkRow(tab, "Example go command", y, false, out Button copyApi, out _, out _);
         y += 46;
 
         copyBar.Click += (_, _) => CopyToClipboard(_txtBarUrl.Text);
@@ -223,6 +227,9 @@ public partial class MainForm : Form
         copyApi.Click += (_, _) => CopyToClipboard(_txtApiExample.Text);
         testBar!.Click += (_, _) => FireTestCountdown("bar");
         testRadial!.Click += (_, _) => FireTestCountdown("radial");
+        // Stops the overlay directly, no HTTP round trip needed, this is the same process the server itself would touch, just skipping the network hop since there's no reason to leave the app to talk to itself.
+        stopBar!.Click += (_, _) => StopOverlay("bar");
+        stopRadial!.Click += (_, _) => StopOverlay("radial");
 
         var hint = new Label
         {
@@ -230,7 +237,7 @@ public partial class MainForm : Form
             Size = new Size(360, 40),
             ForeColor = Color.Gray,
             Font = new Font("Segoe UI", 7.5F),
-            Text = "Test starts a plain 1 hour countdown using your saved ad-free colour, so it also works as a quick preview after changing colours in Overlay settings."
+            Text = "Test starts a plain 1 hour countdown using your saved ad-free colour, Stop clears it back to idle, both work any time you just want to check positioning in OBS."
         };
         tab.Controls.Add(hint);
     }
@@ -249,7 +256,7 @@ public partial class MainForm : Form
         tab.Controls.Add(_txtAdBreak);
         y += 32;
 
-        tab.Controls.Add(new Label { Location = new Point(12, y + 3), AutoSize = true, Text = "Time between ads (Twitch's number)" });
+        tab.Controls.Add(new Label { Location = new Point(12, y + 3), AutoSize = true, Text = "Time between ads" });
         _txtAdFree = new TextBox
         {
             Location = new Point(280, y),
@@ -266,7 +273,7 @@ public partial class MainForm : Form
             Size = new Size(360, 28),
             ForeColor = Color.Gray,
             Font = new Font("Segoe UI", 7.5F),
-            Text = "Same number as Twitch's Ads Manager (\"every X minutes\"), full cycle including the ad itself, not just the gap. Only used as a fallback when Twitch's live schedule isn't available."
+            Text = "With Twitch connected, this is used as Twitch's own \"every X minutes\" number and as a fallback if the live schedule's briefly unreachable. Without Twitch, it's the actual loop length below."
         };
         tab.Controls.Add(adFreeHint);
         y += 34;
@@ -282,6 +289,33 @@ public partial class MainForm : Form
         };
         tab.Controls.Add(_numAdBuffer);
         y += 36;
+
+        _chkLocalLoop = new CheckBox
+        {
+            Location = new Point(12, y),
+            AutoSize = true,
+            Text = "Run this automatically, using the times above",
+            Checked = _settings.LocalLoopEnabled
+        };
+        _chkLocalLoop.CheckedChanged += (_, _) =>
+        {
+            _settings.LocalLoopEnabled = _chkLocalLoop.Checked;
+            JsonStore.Save(_settings, Paths.SettingsFile);
+            UpdateAutomationState();
+        };
+        tab.Controls.Add(_chkLocalLoop);
+        y += 24;
+
+        var localLoopHint = new Label
+        {
+            Location = new Point(12, y),
+            Size = new Size(360, 42),
+            ForeColor = Color.Gray,
+            Font = new Font("Segoe UI", 7.5F),
+            Text = "A basic version of the full Twitch driven cycle, for when a Twitch account isn't connected. Connecting Twitch and turning on Auto detect ads always takes priority over this."
+        };
+        tab.Controls.Add(localLoopHint);
+        y += 42;
 
         _btnSaveSettings = new Button { Location = new Point(12, y), Size = new Size(368, 30), Text = "Save settings" };
         _btnSaveSettings.Click += (_, _) => SaveAdTimingSettings();
@@ -339,7 +373,7 @@ public partial class MainForm : Form
         {
             _settings.AutoDetectAds = _chkAutoDetectAds.Checked;
             JsonStore.Save(_settings, Paths.SettingsFile);
-            UpdateAutoDetectRunningState();
+            UpdateAutomationState();
         };
         tab.Controls.Add(_chkAutoDetectAds);
 
@@ -367,7 +401,7 @@ public partial class MainForm : Form
             Size = new Size(360, 34),
             ForeColor = Color.Gray,
             Font = new Font("Segoe UI", 7.5F),
-            Text = "Turns on by itself the moment an account connects. Switch it off any time to trigger the overlay manually instead, e.g. via the API."
+            Text = "Turns on by itself the moment an account connects. Also picks which overlay(s) the Timing tab's local loop drives, when that's active instead."
         };
         tab.Controls.Add(hint);
 
@@ -424,7 +458,7 @@ public partial class MainForm : Form
         _settings.AutoDetectAds = false;
         JsonStore.Save(_settings, Paths.SettingsFile);
         UpdateTwitchTabUi(null);
-        UpdateAutoDetectRunningState();
+        UpdateAutomationState();
         _tokenValidator?.Stop();
 
         MessageBox.Show(this,
@@ -441,6 +475,7 @@ public partial class MainForm : Form
         if (token is null)
         {
             UpdateTwitchTabUi(null);
+            UpdateAutomationState();
             return;
         }
 
@@ -451,6 +486,7 @@ public partial class MainForm : Form
             {
                 TwitchTokenStore.Delete();
                 UpdateTwitchTabUi(null);
+                UpdateAutomationState();
                 return;
             }
             token = refreshed;
@@ -458,7 +494,7 @@ public partial class MainForm : Form
 
         _twitchToken = token;
         UpdateTwitchTabUi(token);
-        UpdateAutoDetectRunningState();
+        UpdateAutomationState();
         EnsureTokenValidator().Start();
     }
 
@@ -477,7 +513,7 @@ public partial class MainForm : Form
             JsonStore.Save(_settings, Paths.SettingsFile);
 
             Logger.Log("[TWITCH]", $"Connected as {_twitchToken.DisplayName}");
-            UpdateAutoDetectRunningState();
+            UpdateAutomationState();
             EnsureTokenValidator().Start();
         }
     }
@@ -496,8 +532,7 @@ public partial class MainForm : Form
         UpdateTwitchTabUi(null);
 
         Logger.Log("[TWITCH]", "Disconnected.");
-        UpdateAutoDetectRunningState();
-        // Was wrongly calling EnsureTokenValidator().Start() here before, a copy-paste leftover from the connect path. There's no token to validate any more at this point, this genuinely mirrors OnTwitchTokenInvalid's handling of the same situation now, stop it, don't start a pointless loop that just checks a null token every hour until reconnected.
+        UpdateAutomationState();
         _tokenValidator?.Stop();
     }
 
@@ -511,13 +546,15 @@ public partial class MainForm : Form
         return refreshed;
     }
 
-    private void UpdateAutoDetectRunningState()
+    private void UpdateAutomationState()
     {
-        bool shouldRun = _server.IsRunning && _twitchToken != null && _settings.AutoDetectAds;
+        bool twitchShouldRun = _server.IsRunning && _twitchToken != null && _settings.AutoDetectAds;
+        bool localShouldRun = _server.IsRunning && !twitchShouldRun && _settings.LocalLoopEnabled;
 
-        Logger.Log("[TWITCH]", $"Auto detect check: shouldRun={shouldRun} (serverRunning={_server.IsRunning}, connected={_twitchToken != null}, autoDetectAds={_settings.AutoDetectAds})");
+        Logger.Log("[TWITCH]", $"Auto detect check: shouldRun={twitchShouldRun} (serverRunning={_server.IsRunning}, connected={_twitchToken != null}, autoDetectAds={_settings.AutoDetectAds})");
+        Logger.Log("[LOCAL]", $"Local loop check: shouldRun={localShouldRun} (serverRunning={_server.IsRunning}, twitchActive={twitchShouldRun}, localLoopEnabled={_settings.LocalLoopEnabled})");
 
-        if (shouldRun)
+        if (twitchShouldRun)
         {
             _adSequencer ??= CreateAdSequencer();
 
@@ -541,9 +578,28 @@ public partial class MainForm : Form
             _schedulePoller?.Stop();
             _adSequencer?.Stop();
         }
+
+        if (localShouldRun)
+        {
+            _localSequencer ??= CreateLocalSequencer();
+            _localSequencer.Start();
+        }
+        else
+        {
+            _localSequencer?.Stop();
+        }
     }
 
     private TwitchAdSequencer CreateAdSequencer() => new(
+        getSettings: () => _settings,
+        getTarget: () => _settings.AutoDetectTarget switch
+        {
+            "Bar" => AdSequencerTarget.Bar,
+            "Radial" => AdSequencerTarget.Radial,
+            _ => AdSequencerTarget.Both
+        });
+
+    private LocalAdSequencer CreateLocalSequencer() => new(
         getSettings: () => _settings,
         getTarget: () => _settings.AutoDetectTarget switch
         {
@@ -623,11 +679,13 @@ public partial class MainForm : Form
         BackColor = Color.Gainsboro
     };
 
-    private TextBox NewLinkRow(Control parent, string caption, int y, bool showTestButton, out Button copyButton, out Button? testButton)
+    // Now returns a third, optional Stop button alongside Copy and Test, only for the bar/radial rows (showTestButton true), the example command row still just gets Copy.
+    private TextBox NewLinkRow(Control parent, string caption, int y, bool showTestButton, out Button copyButton, out Button? testButton, out Button? stopButton)
     {
         parent.Controls.Add(new Label { Location = new Point(12, y), AutoSize = true, ForeColor = Color.Gray, Text = caption });
 
-        int textBoxWidth = showTestButton ? 210 : 290;
+        // Narrowed from 210 to fit a third button alongside Copy and Test without crowding the row.
+        int textBoxWidth = showTestButton ? 170 : 290;
 
         var textBox = new TextBox
         {
@@ -642,19 +700,23 @@ public partial class MainForm : Form
         copyButton = new Button
         {
             Location = new Point(copyX, y + 15),
-            Size = new Size(showTestButton ? 50 : 64, 25),
+            Size = new Size(showTestButton ? 54 : 64, 25),
             Text = "Copy"
         };
         parent.Controls.Add(copyButton);
 
         if (showTestButton)
         {
-            testButton = new Button { Location = new Point(copyX + 54, y + 15), Size = new Size(50, 25), Text = "Test" };
+            testButton = new Button { Location = new Point(copyX + 54, y + 15), Size = new Size(42, 25), Text = "Test" };
             parent.Controls.Add(testButton);
+
+            stopButton = new Button { Location = new Point(copyX + 98, y + 15), Size = new Size(42, 25), Text = "Stop" };
+            parent.Controls.Add(stopButton);
         }
         else
         {
             testButton = null;
+            stopButton = null;
         }
 
         return textBox;
@@ -679,7 +741,7 @@ public partial class MainForm : Form
             ? OverlayCommandExecutor.GetBarColors().adFreeColor
             : OverlayCommandExecutor.GetRadialColors().adFreeColor;
 
-        string url = $"http://localhost:{_server.Port}/{overlay}/api?cmd=go&t=01:00:00&color={Uri.EscapeDataString(color)}";
+        string url = $"http://localhost:{_server.Port}/{overlay}/api?cmd=go&t=00:20:00&color={Uri.EscapeDataString(color)}";
         Logger.Log("[TEST]", $"Firing test countdown for {overlay}, read colour \"{color}\", full URL: {url}");
         try
         {
@@ -691,6 +753,18 @@ public partial class MainForm : Form
             MessageBox.Show(this, $"Couldn't start the test countdown: {ex.Message}", "Ad Break Timer",
                 MessageBoxButtons.OK, MessageBoxIcon.Error);
         }
+    }
+
+    // Called by the new Stop button, clears the chosen overlay back to idle. Goes straight through OverlayCommandExecutor rather than firing an HTTP request at my own server, that's the same lock protected code path the server itself uses to run this command, no reason to leave the process just to talk to itself.
+    private void StopOverlay(string overlay)
+    {
+        var qs = new NameValueCollection();
+        var result = overlay == "bar"
+            ? OverlayCommandExecutor.ExecuteBar("stop", qs)
+            : OverlayCommandExecutor.ExecuteRadial("stop", qs);
+
+        if (!result.Ok)
+            Logger.Log("[ERROR]", $"Stop button failed for {overlay}: {result.Error}");
     }
 
     // ------------------------------------------------------------
@@ -726,7 +800,7 @@ public partial class MainForm : Form
         if (InvokeRequired) { Invoke(() => OnServerStatusChanged(isRunning)); return; }
         if (isRunning) _hasErrorSinceStart = false;
         RefreshStatusDisplay();
-        UpdateAutoDetectRunningState();
+        UpdateAutomationState();
     }
 
     private void OnErrorLogged()
@@ -885,6 +959,7 @@ public partial class MainForm : Form
         _schedulePoller?.Stop();
         _adSequencer?.Stop();
         _tokenValidator?.Stop();
+        _localSequencer?.Stop();
 
         _server.Stop();
         _trayIcon.Visible = false;
