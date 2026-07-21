@@ -1,68 +1,97 @@
 # Ad Break Timer
 
-![Status](https://img.shields.io/badge/status-in%20development-yellow)
+![Status](https://img.shields.io/badge/status-beta-yellow)
 ![Platform](https://img.shields.io/badge/platform-Windows-0078D6)
 ![.NET](https://img.shields.io/badge/.NET-10.0-512BD4)
 
-A small Windows control panel that hosts two OBS Browser Source overlays (a bar and a radial ring) and drives them with simple URL commands. Built for Streamer.bot, but works with anything that can send an HTTP request.
+A small Windows app that shows an ad break countdown on your OBS stream, connects directly to your Twitch account, and runs itself, no manual triggering, no Streamer.bot required. It watches for real ad breaks as they happen and switches your overlay between "ad running" and "ad free" automatically.
 
 Made by [Kaydee.Codes](https://kaydee.codes/). Free to use, no data collected, ever.
 
 ---
 
-## Status
+## Download
 
-**This is still in early development and alpha testing, not yet released.** No version number, no build, nothing to download yet. Core functionality (the web server, both overlays, the GUI) is working and being tested, Twitch integration is planned but not started.
+**[Download the latest beta here](https://github.com/YOUR-USERNAME/AdBreakTimerGUI/releases/latest)**
 
-If you've stumbled on this repo early, feel free to poke around, but don't expect it to be stable or documented for general use just yet.
+Extract the zip, double click `AdBreakTimerGUI.exe`, that's it, nothing else to install. No installer wizard yet, so for now it's just a folder you can put anywhere and run.
 
----
-
-## What works so far
-
-- A GUI control panel: start/stop the service, see its status, copy the overlay URLs
-- Two overlays, a bottom bar and a radial ring, both driven by the same URL command API
-- Settings for ad break length, ad free interval, and overlay appearance (direction, size, colours)
-- System tray support, minimises instead of quitting
-- Logging to a file for troubleshooting
-
-## Not built yet
-
-- Twitch EventSub integration (`channel.ad_break.begin`), so the app can auto detect ads without Streamer.bot
-- An actual installer, currently only runs from source
-- Full documentation
+*(Rather build it yourself from source instead? See [Building from source](#building-from-source) further down.)*
 
 ---
 
-## Building from source
+## Setting it up
 
-Needs the .NET 10 SDK. From inside the folder with `AdBreakTimerGUI.csproj`:
+Five steps, most of which you only ever do once.
 
+### 1. Add the overlay to OBS
+
+The app starts its overlay service automatically. On the **Links** tab, copy the **Bar overlay** or **Radial overlay** link and add it as a **Browser Source** in OBS. If you can't see anything yet because nothing's counting down, click **Test** next to it, that starts a plain 1 hour countdown just so you've got something to position and resize.
+
+![Links tab](docs/screenshots/links-tab.png)
+
+### 2. Connect your Twitch account
+
+Go to the **Twitch** tab and click **Connect**. A short code will appear and your browser will open on its own to Twitch's approval page, log in and approve it there. That's the whole flow, no passwords typed into this app, ever.
+
+The moment it connects, **Auto detect ads** switches on by itself. From here, the app is genuinely hands-off: it watches for real ad breaks on your channel and drives the overlay itself, red while an ad's running, green counting down to the next one, correcting itself automatically if Twitch's schedule changes (a snooze, a manually run ad, anything).
+
+![Twitch tab, connected](docs/screenshots/twitch-tab.png)
+
+### 3. (Optional) Choose which overlay auto detect drives
+
+If you're only using the bar, or only the ring, pick that from the dropdown under the checkbox, so the other one doesn't quietly run in the background for no reason.
+
+### 4. (Optional) Adjust how the overlay looks
+
+Click **Bar / Radial settings...** on the **Appearance** tab for direction, size, thickness, colours, and (for the ring) rotation.
+
+![Appearance tab](docs/screenshots/appearance-tab.png)
+
+### 5. (Optional) Timing fallback
+
+The **Timing** tab's numbers are mostly a safety net now, not the main driver, since step 2 makes the app follow Twitch's real, live schedule instead. Worth knowing what's there anyway:
+
+![Timing tab](docs/screenshots/timing-tab.png)
+
+- **Ad break length**: only used to build the example command on the Links tab for manual/Streamer.bot use (see further down).
+- **Time between ads (Twitch's number)**: the same number shown in Twitch's own Ads Manager ("run a 3 minute ad break every X minutes"). Only used if the app genuinely can't reach Twitch's live schedule for a moment, it's a fallback, not the primary source of truth once you're connected.
+- **Gap before ad free countdown**: a short pause after an ad finishes before the green countdown starts, purely so the finish flash is actually visible.
+
+**That's the whole setup.** Once step 2 is done, you shouldn't need to touch this again, it just runs.
+
+---
+
+## Everything below this is the technical reference
+
+The stuff above is genuinely all you need day to day. Everything from here down is for anyone who wants to know how it works underneath, use it without Twitch, build it themselves, or is troubleshooting something.
+
+### Building from source
+
+Only needed if you'd rather build it yourself instead of using the download above.
+
+**Dependency:** the [.NET 10 SDK](https://dotnet.microsoft.com/download) (Windows). This is a one-time install that lets your PC build and run C# apps like this one. Not needed if you're just using the downloaded release, that exe already has everything bundled in.
+
+**Running it:**
+1. Download this project (green **Code** button on this page → **Download ZIP**, then extract it).
+2. Open a terminal in that extracted folder (in File Explorer, type `cmd` into the address bar and press Enter).
+3. Run:
+   ```
+   dotnet run
+   ```
+   First run takes a minute or two while it downloads what it needs, after that the app's window just appears. Keep that terminal window open, closing it closes the app too.
+
+**Building your own standalone exe** (same as the download above, just built by you):
 ```bash
 dotnet publish -c Release
 ```
+Produces a single, self-contained `AdBreakTimerGUI.exe` under `bin\Release\net10.0-windows\win-x64\publish\`, nothing else needs to travel with it.
 
-The exe lands in `bin/Release/net10.0-windows/win-x64/publish/AdBreakTimerGUI.exe`.
+### Using it without a Twitch connection (Streamer.bot / manual control)
 
----
+You don't have to connect Twitch at all. Every overlay is driven by a plain HTTP API, `cmd=go` starts a countdown, `cmd=pause`/`cmd=stop`/etc. control it, so you can trigger everything by hand from Streamer.bot or any tool that can fire a web request. The trade-off is honest: without a Twitch connection, the app has no way to know about snoozes or manually-run ads ahead of time, it only knows what you tell it.
 
-## Config files
-
-Everything lives under `%AppData%\AdBreakTimer`:
-
-```
-%AppData%\AdBreakTimer\
-├── settings.json
-├── bar.json
-├── radial.json
-└── latest.log
-```
-
----
-
-## API reference (quick version)
-
-Base: `http://localhost:<port>/bar/api` or `/radial/api`. Every request returns JSON.
+Base: `http://localhost:<port>/bar/api` or `/radial/api` (port shown on the main window).
 
 The main command:
 ```
@@ -73,9 +102,55 @@ Other general commands: `start`, `pause`, `stop`, `reset`, `settime`, `addtime`,
 
 Bar only: `setdirection` (`drain`/`fill`), `setbarheight`, `setbarwidth`.
 
-Radial only: `setdirection` (`cw`/`ccw`), `setsize`, `setthickness`, `settrackcolor`.
+Radial only: `setdirection` (`cw`/`ccw`), `setsize`, `setthickness`, `settrackcolor`, `setrotation` (`0`/`90`/`180`/`270`).
 
-A proper full reference table will go here once things settle down and this is closer to an actual release.
+Every request returns JSON, `{"ok": true, ...}` or `{"ok": false, "error": "..."}`.
+
+### What Twitch permissions does this actually ask for, and why
+
+Two scopes, both read/manage your own channel's ad data, nothing else:
+
+- `channel:read:ads`: lets the app see when an ad break starts and read your channel's ad schedule (the same data Twitch's own dashboard timer uses).
+- `channel:manage:ads`: needed for the ad schedule endpoint the app polls to stay accurate.
+
+The app never reads chat, followers, subscriptions, or anything unrelated to ads. Your access token is encrypted on disk with Windows' own DPAPI, tied to your Windows account, and never leaves your machine except to talk directly to Twitch's servers. You can revoke access any time from your [Twitch connected accounts settings](https://www.twitch.tv/settings/connections), the app checks hourly and will notice if you do.
+
+### How the automatic side actually works
+
+- A live WebSocket connection to Twitch's EventSub service reacts the instant a real ad break starts, that's what triggers the red countdown.
+- A background check polls Twitch's own ad schedule every 30 seconds (and once immediately after each ad) to keep the green countdown's target accurate, self-correcting for snoozes or Twitch's own dynamic ad pacing without you doing anything.
+- If Twitch's live schedule isn't available for a moment, it falls back to the Timing tab's configured numbers until it is again.
+
+### Config files
+
+Everything lives under `%AppData%\AdBreakTimer`:
+```
+%AppData%\AdBreakTimer\
+├── settings.json     (port, timing, checkboxes)
+├── bar.json           (current bar overlay state)
+├── radial.json        (current radial overlay state)
+├── twitch.token       (encrypted Twitch connection, DPAPI)
+└── latest.log         (full diagnostic log, overwritten fresh every launch)
+```
+The **Open config folder** and **Open log file** buttons on the main window jump straight there.
+
+### Troubleshooting
+
+**If something's not working, the log file is the fastest way to find out why.** Click **Open log file** on the main window, it's rewritten fresh every launch and every line's timestamped.
+
+| Problem | Fix |
+|---|---|
+| Traffic light is amber | Running fine, but something's logged an error since it started, check the log for an `[ERROR]` line. |
+| Traffic light is red but should be green | Click **Start service**. |
+| Nothing shows up in OBS | Confirm the light's green and the Browser Source URL matches the Links tab exactly. |
+| Twitch tab says "Connected" but nothing's happening | Check **Auto detect ads** is ticked, and the service is running, both are required. |
+| Suddenly disconnected with no action taken | The app checks your connection hourly, if you revoked access from Twitch's own settings page, it'll notice and prompt you to reconnect. |
+| `Embedded resource not found` in the browser | The exe wasn't built correctly, run `dotnet clean` then `dotnet publish -c Release` again. |
+
+### Roadmap
+
+- **An actual installer**, so it's a proper setup wizard rather than a download-and-extract zip.
+- **Time drift verification**, comparing the countdown against real elapsed time after the fact, for the rare case a long countdown drifts. Not started, noted so it isn't forgotten.
 
 ---
 
