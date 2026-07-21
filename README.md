@@ -155,6 +155,14 @@ The **Open config folder** and **Open log file** buttons on the main window jump
 
 ---
 
+## Thanks
+
+Huge thanks to **PVG**, a friend and streamer who beta tested this from early on, helped get it actually running properly, and put it through the real test, a live stream with real ads. If you want to see it running for real rather than just reading about it, his channel's the place to go.
+
+[twitch.tv/itspvg](https://www.twitch.tv/itspvg) · [youtube.com/@ItsPVG](https://www.youtube.com/@ItsPVG)
+
+---
+
 ## Licence
 
 Free to use, modify, and share. No attribution required, though it's appreciated. No warranty, use at your own risk.
