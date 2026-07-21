@@ -40,6 +40,7 @@ public partial class MainForm : Form
     private CheckBox _chkAutoDetectAds = null!;
     private TwitchTokenData? _twitchToken;
     private TwitchEventSubClient? _eventSubClient;
+    private TwitchAdSchedulePoller? _schedulePoller;
     private TwitchAdSequencer? _adSequencer;
     private ComboBox _cmbAutoDetectTarget = null!;
 
@@ -74,10 +75,6 @@ public partial class MainForm : Form
 
         _ = LoadTwitchStateAsync();
 
-        // Ticks once a second regardless of whether auto detect is
-        // actually running right now, the tick handler itself decides
-        // what to show based on whatever LastAdStartedUtc/
-        // NextAdEstimatedUtc currently say, including "nothing yet".
         _adCycleDisplayTimer = new System.Windows.Forms.Timer { Interval = 1000 };
         _adCycleDisplayTimer.Tick += (_, _) => RefreshAdCycleDisplay();
         _adCycleDisplayTimer.Start();
@@ -351,10 +348,6 @@ public partial class MainForm : Form
         };
         tab.Controls.Add(hint);
 
-        // The live "since last ad / until next ad" readout, ticked
-        // once a second by _adCycleDisplayTimer. Values start out
-        // showing "no ad detected yet" until the sequencer's actually
-        // seen one for real.
         tab.Controls.Add(new Label { Location = new Point(12, 145), AutoSize = true, ForeColor = Color.Gray, Text = "Last ad break:" });
         _lblLastAd = new Label { Location = new Point(120, 145), AutoSize = true, Text = "No ad detected yet" };
         tab.Controls.Add(_lblLastAd);
@@ -439,6 +432,18 @@ public partial class MainForm : Form
         return refreshed;
     }
 
+    // The single place deciding whether the Twitch background pieces
+    // should actually be running: the web service has to be started,
+    // an account has to be connected, and Auto detect ads has to be
+    // ticked. Called any time one of those three things changes.
+    //
+    // Three separate pieces get started together here:
+    // TwitchEventSubClient (the instant red-bar trigger, unchanged
+    // from before), TwitchAdSchedulePoller (the new one, keeps the
+    // green countdown's target honest against snoozes and Twitch's
+    // own dynamic pacing), and TwitchAdSequencer itself, which both of
+    // the others feed into. The sequencer has to exist before either
+    // of the other two can Attach to it, so it's created first.
     private void UpdateAutoDetectRunningState()
     {
         bool shouldRun = _server.IsRunning && _twitchToken != null && _settings.AutoDetectAds;
@@ -447,36 +452,39 @@ public partial class MainForm : Form
 
         if (shouldRun)
         {
-            _eventSubClient ??= new TwitchEventSubClient(GetValidTwitchTokenAsync);
             _adSequencer ??= CreateAdSequencer();
+
+            if (_eventSubClient == null)
+            {
+                _eventSubClient = new TwitchEventSubClient(GetValidTwitchTokenAsync);
+                _adSequencer.Attach(_eventSubClient);
+            }
             _eventSubClient.Start();
+
+            if (_schedulePoller == null)
+            {
+                _schedulePoller = new TwitchAdSchedulePoller(GetValidTwitchTokenAsync);
+                _adSequencer.AttachSchedulePoller(_schedulePoller);
+            }
+            _schedulePoller.Start();
         }
         else
         {
             _eventSubClient?.Stop();
+            _schedulePoller?.Stop();
             _adSequencer?.Stop();
         }
     }
 
-    private TwitchAdSequencer CreateAdSequencer()
-    {
-        var sequencer = new TwitchAdSequencer(
-            getSettings: () => _settings,
-            getTarget: () => _settings.AutoDetectTarget switch
-            {
-                "Bar" => AdSequencerTarget.Bar,
-                "Radial" => AdSequencerTarget.Radial,
-                _ => AdSequencerTarget.Both
-            });
-        sequencer.Attach(_eventSubClient!);
-        return sequencer;
-    }
+    private TwitchAdSequencer CreateAdSequencer() => new(
+        getSettings: () => _settings,
+        getTarget: () => _settings.AutoDetectTarget switch
+        {
+            "Bar" => AdSequencerTarget.Bar,
+            "Radial" => AdSequencerTarget.Radial,
+            _ => AdSequencerTarget.Both
+        });
 
-    // Reads TwitchAdSequencer's two timestamps and turns them into
-    // readable "X ago" / "in X" text. Called once a second by
-    // _adCycleDisplayTimer, and safe to call even when _adSequencer
-    // hasn't been created yet (nothing's connected, or auto detect's
-    // never been switched on this session).
     private void RefreshAdCycleDisplay()
     {
         if (_adSequencer is null)
@@ -503,10 +511,6 @@ public partial class MainForm : Form
         }
     }
 
-    // A short "Xm Ys" style readout rather than a full hh:mm:ss, this
-    // is a glance-at-it status line, not a precise countdown, doesn't
-    // need leading zeroes or an hours column for anything under an
-    // hour, which covers the vast majority of ad cycles anyway.
     private static string FormatSpan(TimeSpan span)
     {
         if (span < TimeSpan.Zero) span = TimeSpan.Zero;
