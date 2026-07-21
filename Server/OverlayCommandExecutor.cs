@@ -4,7 +4,6 @@ using AdBreakTimerGUI.Engine;
 
 namespace AdBreakTimerGUI.Server;
 
-// The one place that actually executes a bar/radial command, load-tick-mutate-save, all inside a lock. RequestRouter and TwitchAdSequencer both go through this so they can't race each other.
 public static class OverlayCommandExecutor
 {
     public record CommandResult(bool Ok, string? Error, string Json);
@@ -25,11 +24,8 @@ public static class OverlayCommandExecutor
                 TimerEngine.HandleBarSpecific(cmd, qs, state, out error);
 
             JsonStore.Save(state, Paths.BarFile);
+            LogCommand("[BAR]", cmd, error, state);
 
-            if (cmd is not ("status" or ""))
-                Logger.Log("[BAR]", error != null ? $"FAILED {cmd}: {error}" : cmd);
-
-            // Serialised directly against the real BarState here, not a base-typed helper, that silently dropped barHeight/barWidth once already.
             string json = error != null
                 ? System.Text.Json.JsonSerializer.Serialize(new { ok = false, error })
                 : System.Text.Json.JsonSerializer.Serialize(new { ok = true, cmd, state });
@@ -54,9 +50,7 @@ public static class OverlayCommandExecutor
                 TimerEngine.HandleRadialSpecific(cmd, qs, state, out error);
 
             JsonStore.Save(state, Paths.RadialFile);
-
-            if (cmd is not ("status" or ""))
-                Logger.Log("[RADIAL]", error != null ? $"FAILED {cmd}: {error}" : cmd);
+            LogCommand("[RADIAL]", cmd, error, state);
 
             string json = error != null
                 ? System.Text.Json.JsonSerializer.Serialize(new { ok = false, error })
@@ -66,25 +60,52 @@ public static class OverlayCommandExecutor
         }
     }
 
-    // Updates only whatever fields the mutator touches, against the current live state, not a stale copy, same lock as Execute* so this can't race a command either.
+    private static void LogCommand(string tag, string cmd, string? error, OverlayState state)
+    {
+        if (cmd is "status" or "") return;
+
+        string detail = error != null
+            ? $"FAILED {cmd}: {error}"
+            : $"{cmd} (status={state.Status}, color={state.Color}, preferredColor={state.PreferredColor}, finishColor={state.FinishColor}, remaining={TimeParsing.SecsToHms(state.Remaining)})";
+
+        Logger.Log(tag, detail);
+    }
+
     public static void UpdateBarAppearance(Action<BarState> mutate)
     {
         lock (BarLock)
         {
             BarState state = JsonStore.Load<BarState>(Paths.BarFile) ?? new BarState();
 
-            // Snapshot before mutating, so the log can say exactly what changed rather than just "something changed".
             string oldDirection = state.Direction;
             int oldHeight = state.BarHeight;
             string oldWidth = state.BarWidth;
+            string oldLiveColor = state.Color;
+            string oldPreferredColor = state.PreferredColor;
+            string oldFinishColor = state.FinishColor;
+            string oldBgColor = state.BgColor;
+            bool oldFlash = state.FlashOnFinish;
+            int oldFlashDuration = state.FlashDuration;
 
             mutate(state);
+
+            // If the bar was already showing the running colour (not an active ad's finish colour override), pushing the new preference live is safe, this is what makes Save feel instant rather than "changed, but nothing visibly happened until some later countdown". If it wasn't showing the running colour, that almost certainly means an ad's mid-flight right now, so I deliberately leave the live display alone and let the new preference take effect on the next real transition instead of interrupting it.
+            bool wasShowingRunningColor = oldLiveColor == oldPreferredColor;
+            bool applyLiveNow = wasShowingRunningColor && state.PreferredColor != oldPreferredColor;
+            if (applyLiveNow)
+                state.Color = state.PreferredColor;
+
             JsonStore.Save(state, Paths.BarFile);
 
             var changes = new List<string>();
             if (oldDirection != state.Direction) changes.Add($"direction {oldDirection}->{state.Direction}");
             if (oldHeight != state.BarHeight) changes.Add($"height {oldHeight}px->{state.BarHeight}px");
             if (oldWidth != state.BarWidth) changes.Add($"width {oldWidth}->{state.BarWidth}");
+            if (oldPreferredColor != state.PreferredColor) changes.Add($"preferredColor {oldPreferredColor}->{state.PreferredColor}{(applyLiveNow ? " (applied live immediately)" : " (will apply next countdown, an ad's likely showing right now)")}");
+            if (oldFinishColor != state.FinishColor) changes.Add($"finishColor {oldFinishColor}->{state.FinishColor}");
+            if (oldBgColor != state.BgColor) changes.Add($"bgColor {oldBgColor}->{state.BgColor}");
+            if (oldFlash != state.FlashOnFinish) changes.Add($"flashOnFinish {oldFlash}->{state.FlashOnFinish}");
+            if (oldFlashDuration != state.FlashDuration) changes.Add($"flashDuration {oldFlashDuration}s->{state.FlashDuration}s");
 
             Logger.Log("[BAR]", changes.Count > 0 ? $"Appearance updated: {string.Join(", ", changes)}" : "Appearance settings saved, no actual changes.");
         }
@@ -101,8 +122,20 @@ public static class OverlayCommandExecutor
             int oldThickness = state.Thickness;
             string oldTrackColor = state.TrackColor;
             int oldRotation = state.RotationDegrees;
+            string oldLiveColor = state.Color;
+            string oldPreferredColor = state.PreferredColor;
+            string oldFinishColor = state.FinishColor;
+            string oldBgColor = state.BgColor;
+            bool oldFlash = state.FlashOnFinish;
+            int oldFlashDuration = state.FlashDuration;
 
             mutate(state);
+
+            bool wasShowingRunningColor = oldLiveColor == oldPreferredColor;
+            bool applyLiveNow = wasShowingRunningColor && state.PreferredColor != oldPreferredColor;
+            if (applyLiveNow)
+                state.Color = state.PreferredColor;
+
             JsonStore.Save(state, Paths.RadialFile);
 
             var changes = new List<string>();
@@ -111,8 +144,31 @@ public static class OverlayCommandExecutor
             if (oldThickness != state.Thickness) changes.Add($"thickness {oldThickness}%->{state.Thickness}%");
             if (oldTrackColor != state.TrackColor) changes.Add($"trackColor {oldTrackColor}->{state.TrackColor}");
             if (oldRotation != state.RotationDegrees) changes.Add($"rotation {oldRotation}deg->{state.RotationDegrees}deg");
+            if (oldPreferredColor != state.PreferredColor) changes.Add($"preferredColor {oldPreferredColor}->{state.PreferredColor}{(applyLiveNow ? " (applied live immediately)" : " (will apply next countdown, an ad's likely showing right now)")}");
+            if (oldFinishColor != state.FinishColor) changes.Add($"finishColor {oldFinishColor}->{state.FinishColor}");
+            if (oldBgColor != state.BgColor) changes.Add($"bgColor {oldBgColor}->{state.BgColor}");
+            if (oldFlash != state.FlashOnFinish) changes.Add($"flashOnFinish {oldFlash}->{state.FlashOnFinish}");
+            if (oldFlashDuration != state.FlashDuration) changes.Add($"flashDuration {oldFlashDuration}s->{state.FlashDuration}s");
 
             Logger.Log("[RADIAL]", changes.Count > 0 ? $"Appearance updated: {string.Join(", ", changes)}" : "Appearance settings saved, no actual changes.");
+        }
+    }
+
+    public static (string color, string finishColor) GetBarColors()
+    {
+        lock (BarLock)
+        {
+            BarState state = JsonStore.Load<BarState>(Paths.BarFile) ?? new BarState();
+            return (state.PreferredColor, state.FinishColor);
+        }
+    }
+
+    public static (string color, string finishColor) GetRadialColors()
+    {
+        lock (RadialLock)
+        {
+            RadialState state = JsonStore.Load<RadialState>(Paths.RadialFile) ?? new RadialState();
+            return (state.PreferredColor, state.FinishColor);
         }
     }
 }

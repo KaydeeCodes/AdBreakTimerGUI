@@ -44,6 +44,8 @@ public partial class MainForm : Form
     private TwitchAdSequencer? _adSequencer;
     private ComboBox _cmbAutoDetectTarget = null!;
     private TwitchTokenValidator? _tokenValidator;
+    private PictureBox _picTwitchAvatar = null!;
+    private static readonly HttpClient AvatarHttpClient = new();
 
     private Label _lblLastAd = null!;
     private Label _lblNextAd = null!;
@@ -58,6 +60,7 @@ public partial class MainForm : Form
 
         Paths.EnsureConfigDirExists();
         Logger.StartFresh();
+        Logger.Log("[APP]", $"Ad Break Timer v{Application.ProductVersion}, OS {GetFriendlyOsName()}, .NET {Environment.Version}");
 
         _settings = JsonStore.Load<AppSettings>(Paths.SettingsFile) ?? new AppSettings();
 
@@ -79,12 +82,24 @@ public partial class MainForm : Form
         _adCycleDisplayTimer.Start();
     }
 
+    private static string GetFriendlyOsName()
+    {
+        Version v = Environment.OSVersion.Version;
+        string name = v.Build switch
+        {
+            >= 22000 => "Windows 11",
+            >= 10240 => "Windows 10",
+            _ => $"Windows NT {v.Major}.{v.Minor}"
+        };
+        return $"{name} (build {v.Build})";
+    }
+
     // ------------------------------------------------------------
     // Building the window
     // ------------------------------------------------------------
     private void BuildUi()
     {
-        Text = "Ad Break Timer";
+        Text = $"Ad Break Timer v{Application.ProductVersion}";
         FormBorderStyle = FormBorderStyle.FixedSingle;
         MaximizeBox = false;
         StartPosition = FormStartPosition.CenterScreen;
@@ -180,7 +195,7 @@ public partial class MainForm : Form
             ForeColor = Color.Gray,
             Text = "Made by Kaydee.Codes - Free to use, no data collected, ever."
         };
-        lblFooter.LinkArea = new LinkArea(8, 12); // just the "Kaydee.Codes" part is clickable
+        lblFooter.LinkArea = new LinkArea(8, 12);
         lblFooter.LinkClicked += (_, _) => Process.Start(new ProcessStartInfo("https://kaydee.codes/") { UseShellExecute = true });
         Controls.Add(lblFooter);
         y += 26;
@@ -215,7 +230,7 @@ public partial class MainForm : Form
             Size = new Size(360, 40),
             ForeColor = Color.Gray,
             Font = new Font("Segoe UI", 7.5F),
-            Text = "Test starts a plain 1 hour countdown, just enough to position the Browser Source in OBS without needing Streamer.bot running yet."
+            Text = "Test starts a plain 1 hour countdown using your saved running colour, so it also works as a quick preview after changing colours in Overlay settings."
         };
         tab.Controls.Add(hint);
     }
@@ -292,25 +307,33 @@ public partial class MainForm : Form
 
     private void BuildTwitchTab(TabPage tab)
     {
-        _lblTwitchStatus = new Label { Location = new Point(12, 15), AutoSize = true, Text = "Not connected", ForeColor = Color.Gray };
+        _picTwitchAvatar = new PictureBox
+        {
+            Location = new Point(12, 8),
+            Size = new Size(42, 42),
+            SizeMode = PictureBoxSizeMode.StretchImage,
+            Visible = false
+        };
+        tab.Controls.Add(_picTwitchAvatar);
+
+        _lblTwitchStatus = new Label { Location = new Point(62, 20), AutoSize = true, Text = "Not connected", ForeColor = Color.Gray };
         tab.Controls.Add(_lblTwitchStatus);
 
-        _btnTwitchConnect = new Button { Location = new Point(280, 12), Size = new Size(100, 26), Text = "Connect" };
+        _btnTwitchConnect = new Button { Location = new Point(280, 16), Size = new Size(100, 26), Text = "Connect" };
         _btnTwitchConnect.Click += (_, _) => OnTwitchConnectClicked();
         tab.Controls.Add(_btnTwitchConnect);
 
-        // Same spot as Connect, only one visible at a time, toggled by UpdateTwitchTabUi.
-        _btnTwitchDisconnect = new Button { Location = new Point(280, 12), Size = new Size(100, 26), Text = "Disconnect", Visible = false };
+        _btnTwitchDisconnect = new Button { Location = new Point(280, 16), Size = new Size(100, 26), Text = "Disconnect", Visible = false };
         _btnTwitchDisconnect.Click += (_, _) => OnTwitchDisconnectClicked();
         tab.Controls.Add(_btnTwitchDisconnect);
 
         _chkAutoDetectAds = new CheckBox
         {
-            Location = new Point(12, 50),
+            Location = new Point(12, 58),
             AutoSize = true,
             Text = "Auto detect ads and run the overlay automatically",
             Checked = _settings.AutoDetectAds,
-            Enabled = false // nothing for this to do without a connected account, UpdateTwitchTabUi flips it on
+            Enabled = false
         };
         _chkAutoDetectAds.CheckedChanged += (_, _) =>
         {
@@ -322,7 +345,7 @@ public partial class MainForm : Form
 
         _cmbAutoDetectTarget = new ComboBox
         {
-            Location = new Point(12, 75),
+            Location = new Point(12, 83),
             Size = new Size(150, 23),
             DropDownStyle = ComboBoxStyle.DropDownList,
             Enabled = false
@@ -340,24 +363,48 @@ public partial class MainForm : Form
 
         var hint = new Label
         {
-            Location = new Point(12, 105),
+            Location = new Point(12, 113),
             Size = new Size(360, 34),
             ForeColor = Color.Gray,
             Font = new Font("Segoe UI", 7.5F),
-            Text = "Turns on by itself the moment an account connects. Switch it off any time to go back to firing commands manually, e.g. from Streamer.bot."
+            Text = "Turns on by itself the moment an account connects. Switch it off any time to trigger the overlay manually instead, e.g. via the API."
         };
         tab.Controls.Add(hint);
 
-        tab.Controls.Add(new Label { Location = new Point(12, 145), AutoSize = true, ForeColor = Color.Gray, Text = "Last ad break:" });
-        _lblLastAd = new Label { Location = new Point(120, 145), AutoSize = true, Text = "No ad detected yet" };
+        tab.Controls.Add(new Label { Location = new Point(12, 153), AutoSize = true, ForeColor = Color.Gray, Text = "Last ad break:" });
+        _lblLastAd = new Label { Location = new Point(120, 153), AutoSize = true, Text = "No ad detected yet" };
         tab.Controls.Add(_lblLastAd);
 
-        tab.Controls.Add(new Label { Location = new Point(12, 165), AutoSize = true, ForeColor = Color.Gray, Text = "Next ad (est.):" });
-        _lblNextAd = new Label { Location = new Point(120, 165), AutoSize = true, Text = "-" };
+        tab.Controls.Add(new Label { Location = new Point(12, 173), AutoSize = true, ForeColor = Color.Gray, Text = "Next ad (est.):" });
+        _lblNextAd = new Label { Location = new Point(120, 173), AutoSize = true, Text = "-" };
         tab.Controls.Add(_lblNextAd);
     }
 
-    
+    private async void LoadTwitchAvatarAsync(string url)
+    {
+        if (string.IsNullOrEmpty(url))
+        {
+            _picTwitchAvatar.Visible = false;
+            return;
+        }
+
+        try
+        {
+            byte[] bytes = await AvatarHttpClient.GetByteArrayAsync(url);
+            using var ms = new MemoryStream(bytes);
+            Image image = Image.FromStream(ms);
+
+            _picTwitchAvatar.Image?.Dispose();
+            _picTwitchAvatar.Image = image;
+            _picTwitchAvatar.Visible = true;
+        }
+        catch (Exception ex)
+        {
+            Logger.Log("[ERROR]", $"Failed to load Twitch avatar: {ex.Message}");
+            _picTwitchAvatar.Visible = false;
+        }
+    }
+
     private TwitchTokenValidator EnsureTokenValidator()
     {
         if (_tokenValidator == null)
@@ -368,7 +415,6 @@ public partial class MainForm : Form
         return _tokenValidator;
     }
 
-    // Fired by TwitchTokenValidator from a background thread when Twitch says the token's no longer valid, most likely the user disconnected the app from Twitch's own settings page.
     private void OnTwitchTokenInvalid()
     {
         if (InvokeRequired) { Invoke(OnTwitchTokenInvalid); return; }
@@ -385,18 +431,10 @@ public partial class MainForm : Form
             "Your Twitch connection is no longer valid, most likely because it was disconnected from Twitch's own site. Reconnect on the Twitch tab to keep using auto detect.",
             "Ad Break Timer", MessageBoxButtons.OK, MessageBoxIcon.Warning);
     }
-    
-    
-    
-    
-    
-    
-    
-    
+
     // ------------------------------------------------------------
     // Twitch connect / disconnect
     // ------------------------------------------------------------
-    // Runs once at startup, restores a saved connection without needing to reconnect every launch.
     private async Task LoadTwitchStateAsync()
     {
         TwitchTokenData? token = TwitchTokenStore.Load();
@@ -411,7 +449,6 @@ public partial class MainForm : Form
             TwitchTokenData? refreshed = await TwitchAuthService.RefreshAsync(token, CancellationToken.None);
             if (refreshed is null)
             {
-                // Refresh token's no good any more either (revoked, or long unused), forget it and ask to reconnect.
                 TwitchTokenStore.Delete();
                 UpdateTwitchTabUi(null);
                 return;
@@ -435,7 +472,6 @@ public partial class MainForm : Form
             _twitchToken = dlg.Result;
             UpdateTwitchTabUi(_twitchToken);
 
-            // Turns on automatically the moment an account connects, still just a checkbox afterward so it can go back to manual any time.
             _settings.AutoDetectAds = true;
             _chkAutoDetectAds.Checked = true;
             JsonStore.Save(_settings, Paths.SettingsFile);
@@ -464,7 +500,6 @@ public partial class MainForm : Form
         EnsureTokenValidator().Start();
     }
 
-    // Refreshes the token first if it's close to expiring, passed to TwitchEventSubClient/TwitchAdSchedulePoller as a delegate so they always get whatever's current.
     private async Task<TwitchTokenData?> GetValidTwitchTokenAsync()
     {
         if (_twitchToken is null) return null;
@@ -475,7 +510,6 @@ public partial class MainForm : Form
         return refreshed;
     }
 
-    // The single place deciding whether the Twitch background pieces should be running: service started, account connected, auto detect ticked. Sequencer's created first since the other two Attach to it.
     private void UpdateAutoDetectRunningState()
     {
         bool shouldRun = _server.IsRunning && _twitchToken != null && _settings.AutoDetectAds;
@@ -517,8 +551,6 @@ public partial class MainForm : Form
             _ => AdSequencerTarget.Both
         });
 
-    // Reads TwitchAdSequencer's two timestamps into readable "X ago"/"in X" text once a second.
-    // These properties get written from background threads with no lock, technically a data race, but the only consequence is this label showing a one-tick-stale value before self-correcting a second later, purely cosmetic, not worth locking for.
     private void RefreshAdCycleDisplay()
     {
         if (_adSequencer is null)
@@ -559,20 +591,24 @@ public partial class MainForm : Form
         {
             _lblTwitchStatus.Text = "Not connected";
             _lblTwitchStatus.ForeColor = Color.Gray;
+            _lblTwitchStatus.Font = new Font("Segoe UI", 9F, FontStyle.Regular);
             _btnTwitchConnect.Visible = true;
             _btnTwitchDisconnect.Visible = false;
             _chkAutoDetectAds.Enabled = true;
             _cmbAutoDetectTarget.Enabled = true;
             _chkAutoDetectAds.Checked = false;
+            _picTwitchAvatar.Visible = false;
         }
         else
         {
             _lblTwitchStatus.Text = $"Connected as {token.DisplayName}";
             _lblTwitchStatus.ForeColor = SystemColors.ControlText;
+            _lblTwitchStatus.Font = new Font("Segoe UI", 9F, FontStyle.Bold);
             _btnTwitchConnect.Visible = false;
             _btnTwitchDisconnect.Visible = true;
             _chkAutoDetectAds.Enabled = true;
             _cmbAutoDetectTarget.Enabled = true;
+            LoadTwitchAvatarAsync(token.ProfileImageUrl);
         }
     }
 
@@ -629,6 +665,7 @@ public partial class MainForm : Form
         Clipboard.SetText(text);
     }
 
+    // Now explicitly includes the saved running colour (color=), rather than leaving it unset. Previously Test just started a countdown without touching colour at all, meaning it never actually reflected whatever's saved in Overlay settings, so there was no quick way to confirm a colour change without waiting for a real ad cycle to roll around.
     private async void FireTestCountdown(string overlay)
     {
         if (!_server.IsRunning)
@@ -638,7 +675,12 @@ public partial class MainForm : Form
             return;
         }
 
-        string url = $"http://localhost:{_server.Port}/{overlay}/api?cmd=go&t=01:00:00";
+        string color = overlay == "bar"
+            ? OverlayCommandExecutor.GetBarColors().color
+            : OverlayCommandExecutor.GetRadialColors().color;
+
+        string url = $"http://localhost:{_server.Port}/{overlay}/api?cmd=go&t=01:00:00&color={Uri.EscapeDataString(color)}";
+        Logger.Log("[TEST]", $"Firing test countdown for {overlay}, read colour \"{color}\", full URL: {url}");
         try
         {
             await TestHttpClient.GetAsync(url);
@@ -760,7 +802,6 @@ public partial class MainForm : Form
 
         int newBufferSeconds = (int)_numAdBuffer.Value;
 
-        // Same "what actually changed" logging as OverlayCommandExecutor's appearance updates.
         var changes = new List<string>();
         if (_settings.AdBreakSeconds != adBreakSeconds) changes.Add($"adBreakSeconds {_settings.AdBreakSeconds}->{adBreakSeconds}");
         if (_settings.AdFreeSeconds != adFreeSeconds) changes.Add($"adFreeSeconds {_settings.AdFreeSeconds}->{adFreeSeconds}");
@@ -827,7 +868,6 @@ public partial class MainForm : Form
         Close();
     }
 
-    // X button minimises to tray, only the tray menu's Exit genuinely closes it, tracked via _reallyExiting.
     protected override void OnFormClosing(FormClosingEventArgs e)
     {
         if (!_reallyExiting && _chkMinimizeTray.Checked)
@@ -841,7 +881,6 @@ public partial class MainForm : Form
         _adCycleDisplayTimer.Stop();
         _adCycleDisplayTimer.Dispose();
 
-        // Was missing before, the process ending would tear these down regardless, but stopping them explicitly avoids a lingering WebSocket close attempt or log noise racing the actual shutdown.
         _eventSubClient?.Stop();
         _schedulePoller?.Stop();
         _adSequencer?.Stop();

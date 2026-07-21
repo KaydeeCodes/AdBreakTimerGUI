@@ -7,14 +7,11 @@ namespace AdBreakTimerGUI.Twitch;
 
 public enum AdSequencerTarget { Bar, Radial, Both }
 
-// Turns TwitchEventSubClient's AdBreakBegan into the red-then-green cycle, and keeps the green target honest against the schedule poller. Can also start the green phase directly from a poll if there's no cycle running yet, that's what covers "app opened mid-stream" or "went live while the app was already open".
 public class TwitchAdSequencer
 {
-    private const string AdColor = "#ff0000";
-    private const string AdFreeColor = "#00ff00";
     private const int MinimumAdFreeSeconds = 5;
     private static readonly TimeSpan ImmediatePollTimeout = TimeSpan.FromSeconds(5);
-    private const double AdjustThresholdSeconds = 5; // ignore poll jitter smaller than this
+    private const double AdjustThresholdSeconds = 5;
 
     private enum Phase { Idle, Ad, AdFree }
     private volatile Phase _phase = Phase.Idle;
@@ -78,10 +75,9 @@ public class TwitchAdSequencer
             _cycleCts = newCts;
         }
 
-        _ = RunAdCycleAsync(durationSeconds, newCts.Token);
+        _ = RunAdCycleAsync(durationSeconds, newCts);
     }
 
-    // Every poll result comes through here. What it does depends on the current phase: adjusts a running green countdown, starts one from scratch if nothing's running yet, or does nothing during a red countdown, the real ad event owns that entirely.
     private void OnScheduleUpdated(AdScheduleData data)
     {
         if (_phase == Phase.AdFree)
@@ -92,7 +88,6 @@ public class TwitchAdSequencer
 
         if (_phase == Phase.Idle && data.NextAdAtUtc is { } nextAd && nextAd > DateTime.UtcNow)
         {
-            // This is the fix for "the app does nothing until the first ad happens". Without a red countdown to hand off from, there was previously no way for the green phase to ever start on its own, even though the real target was sitting right there from the very first poll.
             Logger.Log("[TWITCH]", $"No cycle running, but Twitch's schedule shows a next ad at {nextAd.ToLocalTime():HH:mm:ss}, starting the ad-free countdown now instead of waiting for that ad to actually happen.");
 
             var newCts = new CancellationTokenSource();
@@ -102,7 +97,7 @@ public class TwitchAdSequencer
                 _cycleCts = newCts;
             }
 
-            _ = RunAdFreeFromScheduleAsync(nextAd, newCts.Token);
+            _ = RunAdFreeFromScheduleAsync(nextAd, newCts);
         }
     }
 
@@ -124,28 +119,36 @@ public class TwitchAdSequencer
         int remainingSeconds = Math.Max(MinimumAdFreeSeconds, (int)(newTarget - DateTime.UtcNow).TotalSeconds);
         Logger.Log("[TWITCH]", $"Ad schedule poll adjusted the ad-free countdown by {diffSeconds:F0}s, now targeting {newTarget.ToLocalTime():HH:mm:ss} ({remainingSeconds}s remaining).");
 
-        FireGo(_getTarget(), remainingSeconds, AdFreeColor);
+        FireGo(_getTarget(), remainingSeconds, isAdPhase: false);
     }
 
-    // The normal path: a real ad break happened, red first, then green.
-    private async Task RunAdCycleAsync(int adDurationSeconds, CancellationToken token)
+    private bool StillOwnsCurrentCycle(CancellationTokenSource myCts)
     {
+        lock (_lock)
+        {
+            return ReferenceEquals(_cycleCts, myCts);
+        }
+    }
+
+    private async Task RunAdCycleAsync(int adDurationSeconds, CancellationTokenSource cts)
+    {
+        CancellationToken token = cts.Token;
         try
         {
             AppSettings settings = _getSettings();
             AdSequencerTarget target = _getTarget();
 
             _phase = Phase.Ad;
-            FireGo(target, adDurationSeconds, AdColor);
+            FireGo(target, adDurationSeconds, isAdPhase: true);
             await Task.Delay(TimeSpan.FromSeconds(adDurationSeconds), token);
 
+            // This pause is what gives the ad's own finish flash room to actually be seen before the next go call overwrites it, same idea as the fix below for the ad-free side, just already working here because this wait already existed for a different stated reason.
             if (settings.AdBufferSeconds > 0)
             {
                 Logger.Log("[TWITCH]", $"Ad countdown finished, waiting {settings.AdBufferSeconds}s before the ad-free countdown.");
                 await Task.Delay(TimeSpan.FromSeconds(settings.AdBufferSeconds), token);
             }
 
-            // Try the real answer immediately, before showing anything, avoids showing a guess that then visibly jumps once corrected.
             AdScheduleData? fresh = null;
             if (_schedulePoller != null)
             {
@@ -155,67 +158,69 @@ public class TwitchAdSequencer
                     timeoutCts.CancelAfter(ImmediatePollTimeout);
                     fresh = await _schedulePoller.PollNowAsync(timeoutCts.Token);
                 }
-                catch (OperationCanceledException) when (!token.IsCancellationRequested)
-                {
-                    // Just the timeout, not the cycle being cancelled.
-                }
+                catch (OperationCanceledException) when (!token.IsCancellationRequested) { }
             }
 
             DateTime targetUtc;
-            int adFreeSeconds;
 
             if (fresh?.NextAdAtUtc is { } freshNext && freshNext > DateTime.UtcNow)
             {
                 targetUtc = freshNext;
-                adFreeSeconds = Math.Max(MinimumAdFreeSeconds, (int)(targetUtc - DateTime.UtcNow).TotalSeconds);
-                Logger.Log("[TWITCH]", $"Got a fresh schedule reading immediately, starting ad-free countdown for {adFreeSeconds}s targeting {targetUtc.ToLocalTime():HH:mm:ss}, no guess needed.");
+                Logger.Log("[TWITCH]", $"Got a fresh schedule reading immediately, targeting {targetUtc.ToLocalTime():HH:mm:ss}, no guess needed.");
             }
             else
             {
                 int rawAdFreeSeconds = settings.AdFreeSeconds - adDurationSeconds - settings.AdBufferSeconds;
-                adFreeSeconds = Math.Max(MinimumAdFreeSeconds, rawAdFreeSeconds);
+                int adFreeSeconds = Math.Max(MinimumAdFreeSeconds, rawAdFreeSeconds);
 
                 if (rawAdFreeSeconds < MinimumAdFreeSeconds)
                     Logger.Log("[ERROR]", $"Configured cycle length ({settings.AdFreeSeconds}s) is too short for a {adDurationSeconds}s ad plus a {settings.AdBufferSeconds}s buffer, flooring to {MinimumAdFreeSeconds}s.");
 
                 targetUtc = DateTime.UtcNow.AddSeconds(adFreeSeconds);
-                Logger.Log("[TWITCH]", $"Starting ad-free countdown for {adFreeSeconds}s (local estimate, no fresh schedule reading yet, the background poller will correct within 30s if needed).");
+                Logger.Log("[TWITCH]", "Starting ad-free countdown (local estimate, no fresh schedule reading yet, the background poller will correct within 30s if needed).");
             }
 
             await EnterAdFreePhaseAsync(target, targetUtc, token);
         }
         catch (OperationCanceledException)
         {
-            _phase = Phase.Idle;
-            Logger.Log("[TWITCH]", "Cycle interrupted (a new ad break arrived, or the sequencer was stopped).");
+            if (StillOwnsCurrentCycle(cts))
+            {
+                _phase = Phase.Idle;
+                Logger.Log("[TWITCH]", "Cycle interrupted (a new ad break arrived, or the sequencer was stopped).");
+            }
         }
         catch (Exception ex)
         {
-            _phase = Phase.Idle;
+            if (StillOwnsCurrentCycle(cts))
+                _phase = Phase.Idle;
             Logger.Log("[ERROR]", $"Ad sequencer cycle crashed unexpectedly: {ex}");
         }
     }
 
-    // The new path: no red countdown happened here, jumping straight into the green phase using a real schedule reading, this is what covers app-just-opened or went-live-while-open.
-    private async Task RunAdFreeFromScheduleAsync(DateTime targetUtc, CancellationToken token)
+    private async Task RunAdFreeFromScheduleAsync(DateTime targetUtc, CancellationTokenSource cts)
     {
+        CancellationToken token = cts.Token;
         try
         {
             await EnterAdFreePhaseAsync(_getTarget(), targetUtc, token);
         }
         catch (OperationCanceledException)
         {
-            _phase = Phase.Idle;
-            Logger.Log("[TWITCH]", "Schedule-started cycle interrupted (a real ad break arrived, or the sequencer was stopped).");
+            if (StillOwnsCurrentCycle(cts))
+            {
+                _phase = Phase.Idle;
+                Logger.Log("[TWITCH]", "Schedule-started cycle interrupted (a real ad break arrived, or the sequencer was stopped).");
+            }
         }
         catch (Exception ex)
         {
-            _phase = Phase.Idle;
+            if (StillOwnsCurrentCycle(cts))
+                _phase = Phase.Idle;
             Logger.Log("[ERROR]", $"Schedule-started ad-free cycle crashed unexpectedly: {ex}");
         }
     }
 
-    // Shared by both paths above: sets the target, fires the green go, waits it out in short steps so AdjustAdFreeTarget can move the target without a full restart, then clears to idle once it's actually reached with nothing new having arrived.
     private async Task EnterAdFreePhaseAsync(AdSequencerTarget target, DateTime targetUtc, CancellationToken token)
     {
         lock (_targetLock) { _adFreeTargetUtc = targetUtc; }
@@ -223,7 +228,7 @@ public class TwitchAdSequencer
         _phase = Phase.AdFree;
 
         int adFreeSeconds = Math.Max(MinimumAdFreeSeconds, (int)(targetUtc - DateTime.UtcNow).TotalSeconds);
-        FireGo(target, adFreeSeconds, AdFreeColor);
+        FireGo(target, adFreeSeconds, isAdPhase: false);
 
         while (true)
         {
@@ -239,31 +244,25 @@ public class TwitchAdSequencer
 
         _phase = Phase.Idle;
         NextAdEstimatedUtc = null;
-        Logger.Log("[TWITCH]", "Ad-free countdown finished with no new ad break, clearing overlay to idle.");
-        FireStop(target);
+
+        // Deliberately not sending a stop command here any more, that was the actual bug: the overlay's own Tick() already handles running -> finished -> flash -> auto idle entirely on its own, purely from the overlay page's regular polling, completely independent of anything this class does. Forcing a stop the instant our own local timer hit the target was cutting that natural flash off before it ever had a chance to show, which is exactly what looked like the bar "vanishing" instead of flashing. Same principle as the ad phase's buffer wait above, just applied by doing nothing instead of waiting, since a real ad event should be arriving right around now anyway.
+        Logger.Log("[TWITCH]", "Ad-free countdown reached its target, leaving the overlay to finish and flash naturally rather than forcing it to idle immediately.");
     }
 
-    private static void FireGo(AdSequencerTarget target, int seconds, string color)
+    private static void FireGo(AdSequencerTarget target, int seconds, bool isAdPhase)
     {
-        var qs = new NameValueCollection
+        if (target is AdSequencerTarget.Bar or AdSequencerTarget.Both)
         {
-            ["t"] = TimeParsing.SecsToHms(seconds),
-            ["color"] = color
-        };
-
-        if (target is AdSequencerTarget.Bar or AdSequencerTarget.Both)
+            var (color, finishColor) = OverlayCommandExecutor.GetBarColors();
+            var qs = new NameValueCollection { ["t"] = TimeParsing.SecsToHms(seconds), ["color"] = isAdPhase ? finishColor : color };
             LogIfError(OverlayCommandExecutor.ExecuteBar("go", qs));
+        }
         if (target is AdSequencerTarget.Radial or AdSequencerTarget.Both)
+        {
+            var (color, finishColor) = OverlayCommandExecutor.GetRadialColors();
+            var qs = new NameValueCollection { ["t"] = TimeParsing.SecsToHms(seconds), ["color"] = isAdPhase ? finishColor : color };
             LogIfError(OverlayCommandExecutor.ExecuteRadial("go", qs));
-    }
-
-    private static void FireStop(AdSequencerTarget target)
-    {
-        var qs = new NameValueCollection();
-        if (target is AdSequencerTarget.Bar or AdSequencerTarget.Both)
-            LogIfError(OverlayCommandExecutor.ExecuteBar("stop", qs));
-        if (target is AdSequencerTarget.Radial or AdSequencerTarget.Both)
-            LogIfError(OverlayCommandExecutor.ExecuteRadial("stop", qs));
+        }
     }
 
     private static void LogIfError(OverlayCommandExecutor.CommandResult result)

@@ -150,7 +150,6 @@ The **Open config folder** and **Open log file** buttons on the main window jump
 ### Roadmap
 
 - **An actual installer**, so it's a proper setup wizard rather than a download-and-extract zip.
-- **Time drift verification**, comparing the countdown against real elapsed time after the fact, for the rare case a long countdown drifts. Not started, noted so it isn't forgotten.
 
 ---
 

@@ -11,7 +11,6 @@ public class DeviceCodeInfo
     public int ExpiresInSeconds { get; set; }
 }
 
-// Twitch's Device Code Grant Flow, no secret anywhere, that's the point of the Public client type.
 public static class TwitchAuthService
 {
     private static readonly HttpClient Http = new();
@@ -84,7 +83,7 @@ public static class TwitchAuthService
                 var tokenData = await tokenResponse.Content.ReadFromJsonAsync<TokenSuccessResponse>(cancellationToken: cancellationToken);
                 if (tokenData is null) return null;
 
-                var (userId, login, displayName) = await FetchUserInfoAsync(tokenData.AccessToken, cancellationToken);
+                var (userId, login, displayName, profileImageUrl) = await FetchUserInfoAsync(tokenData.AccessToken, cancellationToken);
 
                 var result = new TwitchTokenData
                 {
@@ -93,7 +92,8 @@ public static class TwitchAuthService
                     ExpiresAt = DateTime.UtcNow.AddSeconds(tokenData.ExpiresIn),
                     UserId = userId,
                     Login = login,
-                    DisplayName = displayName
+                    DisplayName = displayName,
+                    ProfileImageUrl = profileImageUrl
                 };
 
                 TwitchTokenStore.Save(result);
@@ -125,7 +125,8 @@ public static class TwitchAuthService
         return null;
     }
 
-    private static async Task<(string userId, string login, string displayName)> FetchUserInfoAsync(string accessToken, CancellationToken cancellationToken)
+    // Now also returns profile_image_url, used for the avatar next to "Connected as..." on the Twitch tab.
+    private static async Task<(string userId, string login, string displayName, string profileImageUrl)> FetchUserInfoAsync(string accessToken, CancellationToken cancellationToken)
     {
         try
         {
@@ -137,18 +138,18 @@ public static class TwitchAuthService
             if (!response.IsSuccessStatusCode)
             {
                 Config.Logger.Log("[ERROR]", $"Fetching Twitch user info failed: {(int)response.StatusCode}");
-                return ("", "", "");
+                return ("", "", "", "");
             }
 
             var body = await response.Content.ReadFromJsonAsync<HelixUsersResponse>(cancellationToken: cancellationToken);
             var user = body?.Data?.FirstOrDefault();
-            return user is null ? ("", "", "") : (user.Id, user.Login, user.DisplayName);
+            return user is null ? ("", "", "", "") : (user.Id, user.Login, user.DisplayName, user.ProfileImageUrl);
         }
         catch (OperationCanceledException) { throw; }
         catch (Exception ex)
         {
             Config.Logger.Log("[ERROR]", $"Fetching Twitch user info threw: {ex.Message}");
-            return ("", "", "");
+            return ("", "", "", "");
         }
     }
 
@@ -180,7 +181,8 @@ public static class TwitchAuthService
                 ExpiresAt = DateTime.UtcNow.AddSeconds(tokenData.ExpiresIn),
                 UserId = current.UserId,
                 Login = current.Login,
-                DisplayName = current.DisplayName
+                DisplayName = current.DisplayName,
+                ProfileImageUrl = current.ProfileImageUrl // not re-fetched on refresh, carried forward as-is
             };
 
             TwitchTokenStore.Save(updated);
@@ -194,7 +196,6 @@ public static class TwitchAuthService
         }
     }
 
-    // Twitch requires this be called on startup and hourly while holding an OAuth session, specifically to detect the user disconnecting from Twitch's own settings page, not just token expiry. Note the header scheme, "OAuth", not "Bearer" like every other call in this file, that's Twitch's own inconsistency, not a typo here.
     public static async Task<bool> ValidateAsync(TwitchTokenData token, CancellationToken cancellationToken)
     {
         try
@@ -207,7 +208,6 @@ public static class TwitchAuthService
         catch (OperationCanceledException) { throw; }
         catch (Exception ex)
         {
-            // A network failure isn't the same as an actually invalid token, treating this as still valid so a brief outage doesn't sign the user out.
             Config.Logger.Log("[ERROR]", $"Twitch token validate threw: {ex.Message}");
             return true;
         }
@@ -244,5 +244,6 @@ public static class TwitchAuthService
         [JsonPropertyName("id")] public string Id { get; set; } = "";
         [JsonPropertyName("login")] public string Login { get; set; } = "";
         [JsonPropertyName("display_name")] public string DisplayName { get; set; } = "";
+        [JsonPropertyName("profile_image_url")] public string ProfileImageUrl { get; set; } = "";
     }
 }
