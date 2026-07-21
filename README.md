@@ -12,7 +12,7 @@ Made by [Kaydee.Codes](https://kaydee.codes/). Free to use, no data collected, e
 
 ## Download
 
-**[Download v1.0.0 here](https://github.com/YOUR-USERNAME/AdBreakTimerGUI/releases/tag/v1.0.0](https://github.com/KaydeeCodes/AdBreakTimerGUI/releases/tag/v1.0.0))**
+**[Download v1.0.0 here](https://github.com/KaydeeCodes/AdBreakTimerGUI/releases/tag/v1.0.0)**
 
 Extract the zip, double click `AdBreakTimerGUI.exe`, that's it, nothing else to install. No installer wizard yet, so for now it's a folder you can put anywhere and run.
 
