@@ -4,7 +4,6 @@ using System.Text.Json.Serialization;
 
 namespace AdBreakTimerGUI.Twitch;
 
-// What the caller gets the moment Twitch hands back a device code, the short code and URL to go type it into.
 public class DeviceCodeInfo
 {
     public string UserCode { get; set; } = "";
@@ -17,7 +16,6 @@ public static class TwitchAuthService
 {
     private static readonly HttpClient Http = new();
 
-    // onCodeReady fires once, my cue to show the code and open the browser. Polls quietly in the background from there until approved, denied, or timed out.
     public static async Task<TwitchTokenData?> ConnectAsync(Action<DeviceCodeInfo> onCodeReady, CancellationToken cancellationToken)
     {
         DeviceCodeResponse? device;
@@ -41,7 +39,6 @@ public static class TwitchAuthService
         catch (OperationCanceledException) { throw; }
         catch (Exception ex)
         {
-            // Was unguarded before, a network blip here used to throw all the way out to the global crash handler instead of just failing the connect attempt cleanly.
             Config.Logger.Log("[ERROR]", $"Twitch device code request threw: {ex.Message}");
             return null;
         }
@@ -55,7 +52,6 @@ public static class TwitchAuthService
             ExpiresInSeconds = device.ExpiresIn
         });
 
-        // Twitch tells me how often to poll, I respect that and widen it further on slow_down.
         int intervalSeconds = Math.Max(1, device.Interval);
         DateTime deadline = DateTime.UtcNow.AddSeconds(device.ExpiresIn);
 
@@ -79,7 +75,6 @@ public static class TwitchAuthService
             catch (OperationCanceledException) { throw; }
             catch (Exception ex)
             {
-                // A single flaky poll shouldn't end the whole connect attempt, log it and just try again next interval.
                 Config.Logger.Log("[ERROR]", $"Twitch token poll threw: {ex.Message}");
                 continue;
             }
@@ -105,7 +100,6 @@ public static class TwitchAuthService
                 return result;
             }
 
-            // Not approved yet, expected while I haven't confirmed on Twitch's site.
             var errorBody = await tokenResponse.Content.ReadFromJsonAsync<DeviceErrorResponse>(cancellationToken: cancellationToken);
             switch (errorBody?.Message)
             {
@@ -131,7 +125,6 @@ public static class TwitchAuthService
         return null;
     }
 
-    // Used once right after getting a token, for the display name shown in the GUI and the user ID EventSub needs.
     private static async Task<(string userId, string login, string displayName)> FetchUserInfoAsync(string accessToken, CancellationToken cancellationToken)
     {
         try
@@ -159,7 +152,6 @@ public static class TwitchAuthService
         }
     }
 
-    // Exchanges a refresh token for a new access token, no secret needed here either.
     public static async Task<TwitchTokenData?> RefreshAsync(TwitchTokenData current, CancellationToken cancellationToken)
     {
         try
@@ -202,7 +194,25 @@ public static class TwitchAuthService
         }
     }
 
-    // Raw Twitch JSON shapes, only used for deserialising within this file.
+    // Twitch requires this be called on startup and hourly while holding an OAuth session, specifically to detect the user disconnecting from Twitch's own settings page, not just token expiry. Note the header scheme, "OAuth", not "Bearer" like every other call in this file, that's Twitch's own inconsistency, not a typo here.
+    public static async Task<bool> ValidateAsync(TwitchTokenData token, CancellationToken cancellationToken)
+    {
+        try
+        {
+            using var request = new HttpRequestMessage(HttpMethod.Get, "https://id.twitch.tv/oauth2/validate");
+            request.Headers.Add("Authorization", $"OAuth {token.AccessToken}");
+            var response = await Http.SendAsync(request, cancellationToken);
+            return response.IsSuccessStatusCode;
+        }
+        catch (OperationCanceledException) { throw; }
+        catch (Exception ex)
+        {
+            // A network failure isn't the same as an actually invalid token, treating this as still valid so a brief outage doesn't sign the user out.
+            Config.Logger.Log("[ERROR]", $"Twitch token validate threw: {ex.Message}");
+            return true;
+        }
+    }
+
     private class DeviceCodeResponse
     {
         [JsonPropertyName("device_code")] public string DeviceCode { get; set; } = "";

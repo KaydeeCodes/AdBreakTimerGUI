@@ -12,7 +12,7 @@ publish/
 *.DotSettings.user
 
 # Exception: keep the spell-checker dictionary if you add custom words
-# later (the old console project did this too — it's just a word list,
+# later (the old console project did this too - it's just a word list,
 # genuinely useful to share so Rider doesn't flag your own terms as
 # typos on a clean clone).
 !.idea/dictionaries/

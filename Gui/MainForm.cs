@@ -43,6 +43,7 @@ public partial class MainForm : Form
     private TwitchAdSchedulePoller? _schedulePoller;
     private TwitchAdSequencer? _adSequencer;
     private ComboBox _cmbAutoDetectTarget = null!;
+    private TwitchTokenValidator? _tokenValidator;
 
     private Label _lblLastAd = null!;
     private Label _lblNextAd = null!;
@@ -352,10 +353,46 @@ public partial class MainForm : Form
         tab.Controls.Add(_lblLastAd);
 
         tab.Controls.Add(new Label { Location = new Point(12, 165), AutoSize = true, ForeColor = Color.Gray, Text = "Next ad (est.):" });
-        _lblNextAd = new Label { Location = new Point(120, 165), AutoSize = true, Text = "—" };
+        _lblNextAd = new Label { Location = new Point(120, 165), AutoSize = true, Text = "-" };
         tab.Controls.Add(_lblNextAd);
     }
 
+    
+    private TwitchTokenValidator EnsureTokenValidator()
+    {
+        if (_tokenValidator == null)
+        {
+            _tokenValidator = new TwitchTokenValidator(GetValidTwitchTokenAsync);
+            _tokenValidator.TokenInvalid += OnTwitchTokenInvalid;
+        }
+        return _tokenValidator;
+    }
+
+    // Fired by TwitchTokenValidator from a background thread when Twitch says the token's no longer valid, most likely the user disconnected the app from Twitch's own settings page.
+    private void OnTwitchTokenInvalid()
+    {
+        if (InvokeRequired) { Invoke(OnTwitchTokenInvalid); return; }
+
+        TwitchTokenStore.Delete();
+        _twitchToken = null;
+        _settings.AutoDetectAds = false;
+        JsonStore.Save(_settings, Paths.SettingsFile);
+        UpdateTwitchTabUi(null);
+        UpdateAutoDetectRunningState();
+        _tokenValidator?.Stop();
+
+        MessageBox.Show(this,
+            "Your Twitch connection is no longer valid, most likely because it was disconnected from Twitch's own site. Reconnect on the Twitch tab to keep using auto detect.",
+            "Ad Break Timer", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+    }
+    
+    
+    
+    
+    
+    
+    
+    
     // ------------------------------------------------------------
     // Twitch connect / disconnect
     // ------------------------------------------------------------
@@ -385,6 +422,7 @@ public partial class MainForm : Form
         _twitchToken = token;
         UpdateTwitchTabUi(token);
         UpdateAutoDetectRunningState();
+        EnsureTokenValidator().Start();
     }
 
     private void OnTwitchConnectClicked()
@@ -404,6 +442,7 @@ public partial class MainForm : Form
 
             Logger.Log("[TWITCH]", $"Connected as {_twitchToken.DisplayName}");
             UpdateAutoDetectRunningState();
+            EnsureTokenValidator().Start();
         }
     }
 
@@ -422,6 +461,7 @@ public partial class MainForm : Form
 
         Logger.Log("[TWITCH]", "Disconnected.");
         UpdateAutoDetectRunningState();
+        EnsureTokenValidator().Start();
     }
 
     // Refreshes the token first if it's close to expiring, passed to TwitchEventSubClient/TwitchAdSchedulePoller as a delegate so they always get whatever's current.
@@ -484,7 +524,7 @@ public partial class MainForm : Form
         if (_adSequencer is null)
         {
             _lblLastAd.Text = "No ad detected yet";
-            _lblNextAd.Text = "—";
+            _lblNextAd.Text = "-";
             return;
         }
 
@@ -501,7 +541,7 @@ public partial class MainForm : Form
         }
         else
         {
-            _lblNextAd.Text = "—";
+            _lblNextAd.Text = "-";
         }
     }
 
@@ -805,6 +845,7 @@ public partial class MainForm : Form
         _eventSubClient?.Stop();
         _schedulePoller?.Stop();
         _adSequencer?.Stop();
+        _tokenValidator?.Stop();
 
         _server.Stop();
         _trayIcon.Visible = false;
